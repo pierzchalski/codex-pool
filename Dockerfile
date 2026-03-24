@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.23-alpine AS build
+FROM docker.io/library/golang:1.23-alpine AS build
 WORKDIR /app
 
 # Allow downloading newer toolchain if needed
@@ -10,7 +10,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o codex-pool .
 
-FROM alpine:3.20
+FROM docker.io/library/alpine:3.20
 RUN apk add --no-cache ca-certificates wget
 RUN addgroup -S codex && adduser -S codex -G codex
 WORKDIR /app

@@ -2,6 +2,8 @@ package main
 
 import (
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -38,11 +40,12 @@ func newPoolWatcher(poolDir, configPath string, handler *proxyHandler) (*poolWat
 
 	// Watch pool directory for credential file changes.
 	if poolDir != "" {
-		if err := w.Add(poolDir); err != nil {
+		count, err := addDirectoryTreeWatch(w, poolDir)
+		if err != nil {
 			w.Close()
 			return nil, err
 		}
-		log.Printf("watching pool directory: %s", poolDir)
+		log.Printf("watching pool directory tree: %s (%d dirs)", poolDir, count)
 	}
 
 	// Watch config file for setting changes.
@@ -92,6 +95,15 @@ func (pw *poolWatcher) handleEvent(event fsnotify.Event) {
 		}
 		pw.debounceCfg = time.AfterFunc(watcherDebounce, pw.reloadConfig)
 		return
+	}
+
+	if event.Has(fsnotify.Create) {
+		count, err := addDirectoryTreeWatch(pw.watcher, event.Name)
+		if err != nil {
+			log.Printf("warning: failed to watch new pool path %s: %v", event.Name, err)
+		} else if count > 0 {
+			log.Printf("watching new pool directory tree: %s (%d dirs)", event.Name, count)
+		}
 	}
 
 	// Otherwise it's a pool directory change.
@@ -146,4 +158,44 @@ func (pw *poolWatcher) reloadConfig() {
 
 func (pw *poolWatcher) close() {
 	pw.watcher.Close()
+}
+
+func addDirectoryTreeWatch(w *fsnotify.Watcher, root string) (int, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		return 0, err
+	}
+	if !info.IsDir() {
+		return 0, nil
+	}
+
+	dirs, err := collectWatchDirs(root)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, dir := range dirs {
+		if err := w.Add(dir); err != nil {
+			return 0, err
+		}
+	}
+
+	return len(dirs), nil
+}
+
+func collectWatchDirs(root string) ([]string, error) {
+	var dirs []string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			dirs = append(dirs, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return dirs, nil
 }

@@ -1,0 +1,3 @@
+services:
+  codex-pool:
+    userns_mode: "keep-id:uid=100,gid=101"
