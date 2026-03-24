@@ -7,12 +7,14 @@ services:
     volumes:
       - ./pool:/app/pool
       - ./data:/app/data
+      - ./container-config:/app/config
     environment:
       - POOL_DIR=/app/pool
       - PROXY_DB_PATH=/app/data/proxy.db
       - PROXY_LISTEN_ADDR=0.0.0.0:8989
       - PROXY_MAX_ATTEMPTS=3
       - PROXY_USAGE_REFRESH_SECONDS=300
+      - CONFIG_PATH=/app/config/config.toml
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8989/healthz"]
       interval: 30s

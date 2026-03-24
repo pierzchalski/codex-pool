@@ -78,15 +78,23 @@ func parseInt64(s string) (int64, error) {
 	return n, err
 }
 
+func getConfigPath() string {
+	if v := strings.TrimSpace(os.Getenv("CONFIG_PATH")); v != "" {
+		return v
+	}
+	return "config.toml"
+}
+
 // Global config file reference for pool users config
 var globalConfigFile *ConfigFile
 
 func buildConfig() *config {
 	cfg := &config{}
-	// Load config.toml if it exists
-	configFile, err := loadConfigFile("config.toml")
+	configPath := getConfigPath()
+	// Load config file if it exists
+	configFile, err := loadConfigFile(configPath)
 	if err != nil {
-		log.Printf("warning: failed to load config.toml: %v", err)
+		log.Printf("warning: failed to load %s: %v", configPath, err)
 	}
 	globalConfigFile = configFile
 
@@ -323,10 +331,7 @@ func main() {
 	h.startUsagePoller()
 
 	// Start file watcher for hot-reload of pool directory and config.
-	configPath := "config.toml"
-	if v := os.Getenv("CONFIG_PATH"); v != "" {
-		configPath = v
-	}
+	configPath := getConfigPath()
 	if watcher, err := newPoolWatcher(cfg.poolDir, configPath, h); err != nil {
 		log.Printf("warning: failed to start file watcher: %v (hot-reload disabled)", err)
 	} else {
