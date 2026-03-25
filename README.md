@@ -71,21 +71,23 @@ db_path = "./data/proxy.db"
 public_url = "http://127.0.0.1:8989"
 
 # Enables /admin/*.
-admin_token = "replace-this-with-a-random-token"
+admin_token = "replace-with-your-admin_token"
 
 # Secondary-usage threshold for tier preference.
 tier_threshold = 0.50
 
 # Optional self-serve landing page for friends.
-# friend_code = "replace-this-if-you-want-friends-mode"
+# friend_code = "choose-a-friend_code-if-you-want-friends-mode"
 # friend_name = "YourName"
 # friend_tagline = "Optional landing-page tagline"
 
 [pool_users]
 # Required for generated pool-user credentials and /setup/* scripts.
-jwt_secret = "replace-this-with-32+-random-characters"
+jwt_secret = "replace-with-your-pool_users.jwt_secret"
 storage_path = "./data/pool_users.json"
 ```
+
+In the examples below, `<your top-level admin_token>` always means the exact `admin_token` value from this config file. It is different from the per-user pool token returned by `POST /admin/pool-users`.
 
 ### 3. Start the server
 
@@ -116,7 +118,7 @@ The proxy hot-reloads `pool/` automatically. After you drop in a new JSON file, 
 Recommended check:
 
 ```bash
-curl -fsS "http://127.0.0.1:8989/admin/accounts?admin_token=replace-this-with-a-random-token" | jq
+curl -fsS "http://127.0.0.1:8989/admin/accounts?admin_token=replace-with-your-admin_token" | jq
 ```
 
 ---
@@ -154,7 +156,7 @@ If you would rather log in through `codex-pool` directly:
 
 ```bash
 ADD_JSON=$(curl -fsS -X POST \
-  -H 'X-Admin-Token: replace-this-with-a-random-token' \
+  -H 'X-Admin-Token: <your top-level admin_token>' \
   -H 'Content-Type: application/json' \
   -d '{}' \
   http://127.0.0.1:8989/admin/codex/add)
@@ -170,7 +172,7 @@ Open the returned `oauth_url` in a browser. OpenAI will redirect to `http://loca
 CODE='paste-the-code-query-value-here'
 
 curl -fsS -X POST \
-  -H 'X-Admin-Token: replace-this-with-a-random-token' \
+  -H 'X-Admin-Token: <your top-level admin_token>' \
   -H 'Content-Type: application/json' \
   -d "{\"code\":\"$CODE\",\"verifier\":\"$VERIFIER\"}" \
   http://127.0.0.1:8989/admin/codex/exchange | jq
@@ -184,7 +186,7 @@ The recommended Claude path is the built-in OAuth flow. `codex-pool` will fetch 
 
 ```bash
 ADD_JSON=$(curl -fsS -X POST \
-  -H 'X-Admin-Token: replace-this-with-a-random-token' \
+  -H 'X-Admin-Token: <your top-level admin_token>' \
   -H 'Content-Type: application/json' \
   -d '{}' \
   http://127.0.0.1:8989/admin/claude/add)
@@ -200,7 +202,7 @@ Open the returned `oauth_url` in a browser. Anthropic will eventually land on a 
 CODE='paste-the-code-query-value-here'
 
 curl -fsS -X POST \
-  -H 'X-Admin-Token: replace-this-with-a-random-token' \
+  -H 'X-Admin-Token: <your top-level admin_token>' \
   -H 'Content-Type: application/json' \
   -d "{\"code\":\"$CODE\",\"verifier\":\"$VERIFIER\"}" \
   http://127.0.0.1:8989/admin/claude/exchange | jq
@@ -299,7 +301,7 @@ Create the pool user:
 
 ```bash
 POOL_USER_JSON=$(curl -fsS -X POST \
-  -H 'X-Admin-Token: replace-this-with-a-random-token' \
+  -H 'X-Admin-Token: <your top-level admin_token>' \
   -H 'Content-Type: application/json' \
   -d '{"email":"you@example.com","plan_type":"pro"}' \
   http://127.0.0.1:8989/admin/pool-users)
@@ -308,7 +310,7 @@ printf '%s\n' "$POOL_USER_JSON" | jq
 TOKEN=$(printf '%s' "$POOL_USER_JSON" | jq -r .token)
 ```
 
-The returned `token` is the same token used by both `/config/*/<token>` and `/setup/*/<token>`.
+The `X-Admin-Token` header above uses your top-level `admin_token` from config.toml. The returned `token` is a different credential: it is the pool-user token used by both `/config/*/<token>` and `/setup/*/<token>`.
 
 ### Codex CLI
 
@@ -418,10 +420,10 @@ Admin auth rules:
 Examples:
 
 ```bash
-curl -fsS -H 'X-Admin-Token: replace-this-with-a-random-token' \
+curl -fsS -H 'X-Admin-Token: <your top-level admin_token>' \
   http://127.0.0.1:8989/admin/accounts | jq
 
-curl -fsS -X POST -H 'X-Admin-Token: replace-this-with-a-random-token' \
+curl -fsS -X POST -H 'X-Admin-Token: <your top-level admin_token>' \
   http://127.0.0.1:8989/admin/reload
 ```
 
@@ -445,11 +447,11 @@ podman-compose restart codex-pool
 If you want a self-serve landing page for other people, add a `friend_code` and keep `[pool_users].jwt_secret` configured:
 
 ```toml
-friend_code = "replace-this-with-a-shared-code"
+friend_code = "choose-a-friend_code-to-share"
 friend_name = "YourName"
 
 [pool_users]
-jwt_secret = "replace-this-with-32+-random-characters"
+jwt_secret = "replace-with-your-pool_users.jwt_secret"
 ```
 
 That uses the same pool-user machinery described above. The landing page hands out the same style of `/setup/*/<token>` instructions.
