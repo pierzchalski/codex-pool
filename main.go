@@ -79,6 +79,9 @@ func parseInt64(s string) (int64, error) {
 }
 
 func getConfigPath() string {
+	if configFlagValue != "" {
+		return configFlagValue
+	}
 	if v := strings.TrimSpace(os.Getenv("CONFIG_PATH")); v != "" {
 		return v
 	}
@@ -88,8 +91,14 @@ func getConfigPath() string {
 // Global config file reference for pool users config
 var globalConfigFile *ConfigFile
 
+// configFlagValue holds the value of the -config flag, set during flag.Parse().
+var configFlagValue string
+
 func buildConfig() *config {
 	cfg := &config{}
+	flag.StringVar(&configFlagValue, "config", "", "path to config file (overrides CONFIG_PATH env var)")
+	flag.StringVar(&cfg.listenAddr, "listen", cfg.listenAddr, "listen address")
+	flag.Parse()
 	configPath := getConfigPath()
 	// Load config file if it exists.
 	configFile, err := loadConfigFile(configPath)
@@ -190,8 +199,6 @@ func buildConfig() *config {
 	// Tier threshold: secondary usage % at which we stop preferring a tier (default 50%)
 	cfg.tierThreshold = getConfigFloat64("TIER_THRESHOLD", fileCfg.TierThreshold, 0.50)
 
-	flag.StringVar(&cfg.listenAddr, "listen", cfg.listenAddr, "listen address")
-	flag.Parse()
 	return cfg
 }
 
