@@ -1,6 +1,6 @@
 # Codex Pool Proxy Configuration
-# Copy this file to config.toml and customize as needed.
-# Environment variables take precedence over config file values.
+# Copy this file to config.toml (or container-config/config.toml for docker-compose)
+# and customize as needed. Environment variables override file values.
 
 # Server settings
 listen_addr = "127.0.0.1:8989"
@@ -9,28 +9,30 @@ db_path = "./data/proxy.db"
 max_attempts = 3
 disable_refresh = false
 debug = false
-# Max request body size to buffer in memory before streaming (bytes).
-# Set via env PROXY_MAX_INMEM_BODY_BYTES (default 16777216).
 
-# Public URL for generated configs and instructions
-# Use this when behind a reverse proxy or using a custom domain
-# Example: "https://proxy.example.com" or "http://192.168.1.100:8989"
+# Public URL used in generated setup scripts and links.
+# Leave blank to infer from the incoming request.
+# public_url = "https://pool.example.com"
 public_url = ""
 
-# Friend Code Access
-# Enable a self-service landing page at / where users with this code
-# can generate their own credentials.
+# Optional selection tuning for preferred tiers.
+# Defaults to 0.50 if unset.
+# tier_threshold = 0.50
+
+# Enables /admin/* endpoints.
+# If blank, /admin/* returns "admin access disabled".
+admin_token = ""
+
+# Optional self-serve landing page for friends.
 friend_code = ""
+friend_name = ""
+friend_tagline = ""
 
-# Pool Users (Multi-User Mode)
-# Enable this section to allow creating users who can share the pool
-# without access to real account credentials.
+# Pool-user mode settings.
+# Generated Codex / Claude / Gemini client credentials require jwt_secret.
 [pool_users]
-# Password for the admin UI at /admin/pool-users
-admin_password = ""
-
-# Secret key for signing pool user tokens (should be 32+ characters)
+# Secret used to sign pool-user tokens. Use a long random value.
 jwt_secret = ""
 
-# Where to store pool user data
+# Where to store generated pool users.
 storage_path = "./data/pool_users.json"

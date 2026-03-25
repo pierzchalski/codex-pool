@@ -10,9 +10,9 @@
 
 ---
 
-A reverse proxy that distributes your Agent (Codex/Claude/Gemini) sessions across multiple accounts. Got three Codex accounts? Five Claude logins? The proxy spreads your usage across all of them automatically - no manual switching, no juggling auth files.
+`codex-pool` is a reverse proxy that pools **Codex CLI**, **Claude Code**, and **Gemini CLI** accounts behind one endpoint.
 
-Works with **Codex CLI**, **Claude Code**, and **Gemini CLI**.
+You put provider credentials in `pool/`, point your local CLI at the proxy, and `codex-pool` picks a healthy backend account automatically. Conversations stay sticky to the same account for cache reuse, tokens refresh automatically where possible, and the status/admin pages show what is loaded.
 
 <p align="center">
   <img src="screenshots/analytics-dashboard.png" alt="Pool Analytics" width="700">
@@ -20,158 +20,444 @@ Works with **Codex CLI**, **Claude Code**, and **Gemini CLI**.
 
 ---
 
-## Why
+## Read This First
 
-You hit rate limits. You have multiple accounts. Swapping credentials is annoying.
+For real CLI usage, the supported path is:
 
-Or maybe you want to pool accounts with friends - everyone throws their accounts into the pot, everyone benefits from the combined capacity.
+1. Run the proxy with `admin_token` and `[pool_users].jwt_secret` configured.
+2. Add real provider accounts under `pool/`.
+3. Create a pool user.
+4. Run the generated `/setup/<tool>/<token>` script on each client machine.
 
-**codex-pool** handles it:
-- Distributes sessions across all your accounts for each service
-- Routes to whichever account has capacity
-- Pins conversations to the same account (ensures standard cached token performance)
-- Auto-refreshes tokens before they expire
-- Proxies WebSocket upgrades (including Codex Responses WS and realtime `/ws` flows)
-- Tracks usage so you can see who's burning through quota
+That works for a single-user install too. It is also the easiest way to keep Codex, Claude, and Gemini all pointed at the same pool.
 
----
+A few important details:
 
-## Screenshots
-
-### Setup Dashboard
-
-<p align="center">
-  <img src="screenshots/local-mode.png" alt="Local Mode" width="700">
-</p>
-
-### Friends Mode
-Share your pool with others using a friend code.
-
-<p align="center">
-  <img src="screenshots/friends-mode-login.png" alt="Friends Mode" width="500">
-</p>
+- `/admin/*` is **disabled** until top-level `admin_token` is set.
+- Pool-user credentials are only available when `[pool_users].jwt_secret` is set.
+- The filename under `pool/` becomes the account ID shown on `/status` and `/admin/accounts`.
+- **OpenRouter is not a top-level provider directory.** If you want OpenRouter as a Codex fallback, it lives under `pool/codex/`.
 
 ---
 
 ## Quick Start
 
-### 1. Add your accounts
+### 1. Create directories
 
 ```bash
-mkdir -p pool/codex pool/claude pool/gemini
-
-# Codex accounts
-cp ~/.codex/auth.json pool/codex/work.json
-cp ~/backup/.codex/auth.json pool/codex/personal.json
-
-# Claude accounts
-cp ~/.claude/credentials.json pool/claude/main.json
-
-# Gemini accounts
-cp ~/.gemini/oauth_creds.json pool/gemini/main.json
+mkdir -p pool/codex pool/claude pool/gemini data
+mkdir -p container-config
 ```
 
-Structure:
-```
-pool/
-├── codex/
-│   ├── work.json
-│   └── personal.json
-├── claude/
-│   └── main.json
-└── gemini/
-    └── main.json
+If you run the binary directly, the default config path is `./config.toml`.
+
+If you use the provided `docker-compose.yml`, the mounted config file path is:
+
+```text
+container-config/config.toml
 ```
 
-### 2. Run it
+### 2. Write a config file
+
+Use `config.toml` for bare-metal runs, or `container-config/config.toml` for the compose setup.
+
+```toml
+listen_addr = "127.0.0.1:8989"
+pool_dir = "pool"
+db_path = "./data/proxy.db"
+public_url = "http://127.0.0.1:8989"
+
+# Enables /admin/*.
+admin_token = "replace-this-with-a-random-token"
+
+# Secondary-usage threshold for tier preference.
+tier_threshold = 0.50
+
+# Optional self-serve landing page for friends.
+# friend_code = "replace-this-if-you-want-friends-mode"
+# friend_name = "YourName"
+# friend_tagline = "Optional landing-page tagline"
+
+[pool_users]
+# Required for generated pool-user credentials and /setup/* scripts.
+jwt_secret = "replace-this-with-32+-random-characters"
+storage_path = "./data/pool_users.json"
+```
+
+### 3. Start the server
+
+Bare metal:
 
 ```bash
 go build && ./codex-pool
 ```
 
-### 3. Point your CLI
+Docker Compose:
 
-**Codex** - `~/.codex/config.toml`:
-```toml
-model_provider = "codex-pool"
-chatgpt_base_url = "http://127.0.0.1:8989/backend-api"
-
-[model_providers.codex-pool]
-name = "OpenAI via codex-pool proxy"
-base_url = "http://127.0.0.1:8989/v1"
-wire_api = "responses"
-requires_openai_auth = true
+```bash
+docker compose up --build
 ```
 
-**Claude Code**:
+Podman Compose:
+
+```bash
+podman-compose -f docker-compose.yml -f docker-compose.podman.yml up --build
+```
+
+If you run under Podman without the provided override, use an equivalent `keep-id` user namespace mapping. Otherwise `/app/pool` or `/app/data` will usually hit permission errors.
+
+### 4. Add provider accounts to `pool/`
+
+The proxy hot-reloads `pool/` automatically. After you drop in a new JSON file, it should appear on `/status` within about a second.
+
+Recommended check:
+
+```bash
+curl -fsS "http://127.0.0.1:8989/admin/accounts?admin_token=replace-this-with-a-random-token" | jq
+```
+
+---
+
+## Adding Accounts To The Pool
+
+### Codex accounts
+
+The simplest way to add an existing Codex login is to copy its `auth.json` into `pool/codex/`:
+
+```bash
+cp ~/.codex/auth.json pool/codex/codex-work.json
+cp ~/other-home/.codex/auth.json pool/codex/codex-personal.json
+```
+
+Accepted format:
+
+```json
+{
+  "tokens": {
+    "access_token": "...",
+    "refresh_token": "...",
+    "id_token": "...",
+    "account_id": "acct_..."
+  },
+  "last_refresh": "2026-03-25T00:00:00Z"
+}
+```
+
+The proxy preserves unknown fields when it rewrites these files after refreshes.
+
+#### Codex OAuth flow through the admin API
+
+If you would rather log in through `codex-pool` directly:
+
+```bash
+ADD_JSON=$(curl -fsS -X POST \
+  -H 'X-Admin-Token: replace-this-with-a-random-token' \
+  -H 'Content-Type: application/json' \
+  -d '{}' \
+  http://127.0.0.1:8989/admin/codex/add)
+
+printf '%s\n' "$ADD_JSON" | jq
+VERIFIER=$(printf '%s' "$ADD_JSON" | jq -r .verifier)
+printf '%s\n' "$ADD_JSON" | jq -r .oauth_url
+```
+
+Open the returned `oauth_url` in a browser. OpenAI will redirect to `http://localhost:1455/auth/callback`; if nothing is listening there, copy the final URL from the browser address bar and take the `code=` value from it, then exchange it:
+
+```bash
+CODE='paste-the-code-query-value-here'
+
+curl -fsS -X POST \
+  -H 'X-Admin-Token: replace-this-with-a-random-token' \
+  -H 'Content-Type: application/json' \
+  -d "{\"code\":\"$CODE\",\"verifier\":\"$VERIFIER\"}" \
+  http://127.0.0.1:8989/admin/codex/exchange | jq
+```
+
+That saves a new file in `pool/codex/` and reloads the pool.
+
+### Claude accounts
+
+The recommended Claude path is the built-in OAuth flow. `codex-pool` will fetch the account plan from Anthropic and store it in the pool file.
+
+```bash
+ADD_JSON=$(curl -fsS -X POST \
+  -H 'X-Admin-Token: replace-this-with-a-random-token' \
+  -H 'Content-Type: application/json' \
+  -d '{}' \
+  http://127.0.0.1:8989/admin/claude/add)
+
+printf '%s\n' "$ADD_JSON" | jq
+VERIFIER=$(printf '%s' "$ADD_JSON" | jq -r .verifier)
+printf '%s\n' "$ADD_JSON" | jq -r .oauth_url
+```
+
+Open the returned `oauth_url` in a browser. Anthropic will eventually land on a callback URL that contains `code=`; copy that final URL from the browser and exchange the callback `code`:
+
+```bash
+CODE='paste-the-code-query-value-here'
+
+curl -fsS -X POST \
+  -H 'X-Admin-Token: replace-this-with-a-random-token' \
+  -H 'Content-Type: application/json' \
+  -d "{\"code\":\"$CODE\",\"verifier\":\"$VERIFIER\"}" \
+  http://127.0.0.1:8989/admin/claude/exchange | jq
+```
+
+Accepted manual OAuth-file format:
+
+```json
+{
+  "claudeAiOauth": {
+    "accessToken": "sk-ant-oat01-...",
+    "refreshToken": "...",
+    "expiresAt": 1760000000000,
+    "subscriptionType": "max",
+    "rateLimitTier": "default_claude_max_20x"
+  }
+}
+```
+
+Accepted API-key format:
+
+```json
+{
+  "api_key": "sk-ant-api03-...",
+  "plan_type": "max"
+}
+```
+
+`codex-pool` does **not** automatically scrape a live Claude credential out of `~/.claude/credentials.json`. If you want to add Claude manually, write a file in one of the JSON shapes above into `pool/claude/`.
+
+### Gemini accounts
+
+Gemini accounts are added by dropping an OAuth credential file into `pool/gemini/`:
+
+```bash
+cp ~/.gemini/oauth_creds.json pool/gemini/gemini-main.json
+```
+
+Accepted format:
+
+```json
+{
+  "access_token": "ya29....",
+  "refresh_token": "1//....",
+  "token_type": "Bearer",
+  "scope": "...",
+  "expiry_date": 1760000000000,
+  "plan_type": "ultra"
+}
+```
+
+Notes:
+
+- `plan_type` is optional. Use `"ultra"` if you want that account treated as the preferred Gemini tier.
+- There is currently no `/admin/gemini/add` OAuth helper. Gemini accounts are file-based today.
+
+### OpenRouter as a Codex fallback
+
+Put the OpenRouter credential in **`pool/codex/`**, not in its own top-level directory.
+
+Recommended filename:
+
+```text
+pool/codex/codex-openrouter.json
+```
+
+That makes the account show up as `codex-openrouter` on the status/admin pages.
+
+File format:
+
+```json
+{
+  "backend": "openrouter",
+  "base_url": "https://openrouter.ai/api/v1",
+  "plan_type": "api",
+  "OPENAI_API_KEY": "sk-or-v1-..."
+}
+```
+
+Notes:
+
+- `OPENAI_API_KEY` is the field name the loader expects.
+- `plan_type = "api"` is what makes the status page show `api` in the plan column.
+- OpenRouter Codex accounts are treated as a **tier-3 fallback**.
+- They are only used when no better first-party Codex account is eligible.
+- They still satisfy Codex `pro`-required model routing.
+- If a conversation is pinned to OpenRouter and a better first-party Codex account becomes available later, the conversation is unpinned from the fallback so it can move back.
+
+---
+
+## Pointing Your Local CLI At The Pool
+
+Once you have real provider accounts in `pool/`, create a pool user and run the generated setup script for each local CLI.
+
+Create the pool user:
+
+```bash
+POOL_USER_JSON=$(curl -fsS -X POST \
+  -H 'X-Admin-Token: replace-this-with-a-random-token' \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"you@example.com","plan_type":"pro"}' \
+  http://127.0.0.1:8989/admin/pool-users)
+
+printf '%s\n' "$POOL_USER_JSON" | jq
+TOKEN=$(printf '%s' "$POOL_USER_JSON" | jq -r .token)
+```
+
+The returned `token` is the same token used by both `/config/*/<token>` and `/setup/*/<token>`.
+
+### Codex CLI
+
+Run the setup script:
+
+```bash
+curl -fsSL "http://127.0.0.1:8989/setup/codex/$TOKEN" | bash
+```
+
+Windows / PowerShell:
+
+```powershell
+irm "http://127.0.0.1:8989/setup/codex/$TOKEN?shell=powershell" | iex
+```
+
+What the Codex setup script does:
+
+- writes `~/.codex/auth.json`
+- writes or updates `~/.codex/config.toml`
+- writes `~/.codex/model_catalog.json`
+- installs a small `model_sync` MCP sidecar so the model catalog gets refreshed
+- configures Codex to use:
+  - `chatgpt_base_url = ".../backend-api"`
+  - provider `base_url = ".../v1"`
+  - `wire_api = "responses"`
+
+The script is the recommended path. If you configure Codex manually, make sure your config matches those values.
+
+### Claude Code
+
+Run the setup script:
+
+```bash
+curl -fsSL "http://127.0.0.1:8989/setup/claude/$TOKEN" | bash
+```
+
+Windows / PowerShell:
+
+```powershell
+irm "http://127.0.0.1:8989/setup/claude/$TOKEN?shell=powershell" | iex
+```
+
+What the Claude setup script does:
+
+- exports `ANTHROPIC_BASE_URL`
+- exports `CLAUDE_CODE_OAUTH_TOKEN`
+- updates `~/.claude/settings.json`
+- marks `~/.claude.json` as having completed onboarding
+
+Important: for pooled Claude usage, the client credential is **`CLAUDE_CODE_OAUTH_TOKEN`**, not `ANTHROPIC_API_KEY`.
+
+Manual equivalent:
+
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8989"
-export ANTHROPIC_API_KEY="pool"
+export CLAUDE_CODE_OAUTH_TOKEN="<token from /setup/claude/... or generated config>"
 ```
 
-**Gemini CLI**:
+### Gemini CLI
+
+Run the setup script:
+
+```bash
+curl -fsSL "http://127.0.0.1:8989/setup/gemini/$TOKEN" | bash
+```
+
+Windows / PowerShell:
+
+```powershell
+irm "http://127.0.0.1:8989/setup/gemini/$TOKEN?shell=powershell" | iex
+```
+
+What the Gemini setup script does:
+
+- exports `CODE_ASSIST_ENDPOINT`
+- exports `GOOGLE_GENAI_USE_GCA=1`
+- exports `GOOGLE_CLOUD_ACCESS_TOKEN=<pool token>`
+
+Important: the pool-user Gemini path does **not** rely on writing `~/.gemini/oauth_creds.json`. The setup script uses environment variables instead.
+
+Manual equivalent:
+
 ```bash
 export CODE_ASSIST_ENDPOINT="http://127.0.0.1:8989"
+export GOOGLE_GENAI_USE_GCA=1
+export GOOGLE_CLOUD_ACCESS_TOKEN="<token from /setup/gemini/...>"
+```
+
+---
+
+## Status, Admin, And Operations
+
+Useful endpoints:
+
+- `/status`: HTML status page
+- `/healthz`: health check
+- `/admin/accounts`: loaded accounts
+- `/admin/pool-users`: create/list pool users
+- `/admin/reload`: force a pool reload
+
+Admin auth rules:
+
+- API clients should send `X-Admin-Token: ...`.
+- If you are opening an admin page in a browser, use `?admin_token=...`.
+- If `admin_token` is blank, `/admin/*` returns `admin access disabled`.
+
+Examples:
+
+```bash
+curl -fsS -H 'X-Admin-Token: replace-this-with-a-random-token' \
+  http://127.0.0.1:8989/admin/accounts | jq
+
+curl -fsS -X POST -H 'X-Admin-Token: replace-this-with-a-random-token' \
+  http://127.0.0.1:8989/admin/reload
+```
+
+Hot reload behavior:
+
+- Changes under `pool/` are watched and reloaded automatically.
+- The file watcher also reloads some non-sensitive config fields.
+- Sensitive config such as `admin_token`, `friend_code`, and `[pool_users].jwt_secret` is effectively startup config. If you change those, restart the server/container.
+
+Compose restart examples:
+
+```bash
+docker compose restart codex-pool
+podman-compose restart codex-pool
 ```
 
 ---
 
 ## Friends Mode
 
-Pool accounts with friends. Set a code, share the URL:
+If you want a self-serve landing page for other people, add a `friend_code` and keep `[pool_users].jwt_secret` configured:
 
 ```toml
-# config.toml
-friend_code = "secret-code"
-friend_name = "YourName"
-```
-
-They log in, get setup instructions, start using the pool. You see everyone's usage in analytics.
-
----
-
-## Configuration
-
-```toml
-listen_addr = "127.0.0.1:8989"
-pool_dir = "pool"
-
-# Friends mode
-friend_code = "your-secret"
+friend_code = "replace-this-with-a-shared-code"
 friend_name = "YourName"
 
-# Multi-user tracking
 [pool_users]
-admin_password = "admin"
-jwt_secret = "32-char-secret-for-jwt-tokens!!"
+jwt_secret = "replace-this-with-32+-random-characters"
 ```
 
-Environment variable `PROXY_MAX_INMEM_BODY_BYTES` controls how large a request body can be before the proxy streams it directly (no retries). Default is 16777216 (16 MiB).
+That uses the same pool-user machinery described above. The landing page hands out the same style of `/setup/*/<token>` instructions.
 
 ---
 
-## Credential Formats
+## Notes
 
-**Codex** - `pool/codex/*.json`
-```json
-{"tokens": {"access_token": "...", "refresh_token": "...", "account_id": "acct_..."}}
-```
-
-**Claude** - `pool/claude/*.json`
-```json
-{"claudeAiOauth": {"accessToken": "...", "refreshToken": "...", "expiresAt": 1234567890000}}
-```
-
-**Gemini** - `pool/gemini/*.json`
-```json
-{"access_token": "ya29...", "refresh_token": "1//...", "expiry_date": 1234567890000}
-```
-
----
-
-## Disclaimer
-
-This pools credentials you own. Using multiple accounts or sharing access may violate terms of service. If something goes sideways, that's on you.
+- `PROXY_MAX_INMEM_BODY_BYTES` controls how large a request body can be before the proxy streams it directly instead of buffering it for retries. The default is `16777216` (16 MiB).
+- Unknown JSON fields are preserved when account files are rewritten after refreshes.
+- Using multiple accounts or sharing pooled access may violate provider terms. Make your own call.
 
 ---
 
