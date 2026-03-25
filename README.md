@@ -339,6 +339,30 @@ What the Codex setup script does:
 
 The script is the recommended path. If you configure Codex manually, make sure your config matches those values.
 
+Manual equivalent:
+
+```bash
+mkdir -p ~/.codex
+curl -fsSL "http://127.0.0.1:8989/config/codex/$TOKEN" -o ~/.codex/auth.json
+curl -fsSL -H "Authorization: Bearer $(jq -r '.tokens.access_token' ~/.codex/auth.json)" \
+  "http://127.0.0.1:8989/backend-api/codex/models?client_version=0.106.0" \
+  -o ~/.codex/model_catalog.json
+
+cat > ~/.codex/config.toml <<'EOF'
+model_provider = "codex-pool"
+chatgpt_base_url = "http://127.0.0.1:8989/backend-api"
+model_catalog_json = "~/.codex/model_catalog.json"
+
+[model_providers.codex-pool]
+name = "OpenAI via codex-pool proxy"
+base_url = "http://127.0.0.1:8989/v1"
+wire_api = "responses"
+requires_openai_auth = true
+EOF
+```
+
+That manual path writes the same auth file and equivalent Codex config, but it skips the helper MCP sidecar that keeps `model_catalog.json` fresh.
+
 ### Claude Code
 
 Run the setup script:
