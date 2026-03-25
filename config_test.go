@@ -112,3 +112,33 @@ func TestGetConfigSecretPrefersInlineEnvOverEnvFile(t *testing.T) {
 		t.Fatalf("secret = %q", secret)
 	}
 }
+
+func TestGetConfigPath(t *testing.T) {
+	t.Run("flag wins over env and default", func(t *testing.T) {
+		t.Setenv("CONFIG_PATH", "/from/env/config.toml")
+		configFlagValue = "/from/flag/config.toml"
+		t.Cleanup(func() { configFlagValue = "" })
+
+		if got := getConfigPath(); got != "/from/flag/config.toml" {
+			t.Fatalf("getConfigPath() = %q, want /from/flag/config.toml", got)
+		}
+	})
+
+	t.Run("env wins when flag is empty", func(t *testing.T) {
+		t.Setenv("CONFIG_PATH", "/from/env/config.toml")
+		configFlagValue = ""
+
+		if got := getConfigPath(); got != "/from/env/config.toml" {
+			t.Fatalf("getConfigPath() = %q, want /from/env/config.toml", got)
+		}
+	})
+
+	t.Run("default when neither flag nor env is set", func(t *testing.T) {
+		t.Setenv("CONFIG_PATH", "")
+		configFlagValue = ""
+
+		if got := getConfigPath(); got != "config.toml" {
+			t.Fatalf("getConfigPath() = %q, want config.toml", got)
+		}
+	})
+}
