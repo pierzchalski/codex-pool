@@ -89,6 +89,69 @@ func TestExtractRequestedModelFromJSON(t *testing.T) {
 	}
 }
 
+func TestOpenRouterCodexModelID(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "openai model", input: "gpt-5.4-mini", want: "openai/gpt-5.4-mini"},
+		{name: "spark alias", input: "gpt-5.3-codex-spark", want: "openai/gpt-5.3-codex"},
+		{name: "already namespaced", input: "openai/gpt-5.4-mini", want: "openai/gpt-5.4-mini"},
+		{name: "non-openai model", input: "sonnet", want: "sonnet"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := openRouterCodexModelID(tc.input); got != tc.want {
+				t.Fatalf("openRouterCodexModelID(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRewriteCodexOpenRouterRequestModel(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4-mini","input":"hi"}`)
+	rewritten := rewriteCodexOpenRouterRequestModel(body)
+	if string(rewritten) == string(body) {
+		t.Fatalf("expected request body to be rewritten")
+	}
+	if got := extractRequestedModelFromJSON(rewritten); got != "openai/gpt-5.4-mini" {
+		t.Fatalf("rewritten model = %q", got)
+	}
+}
+
+func TestTransformOpenRouterCodexModels(t *testing.T) {
+	body := []byte(`{"data":[{"id":"openai/gpt-5.4-mini","name":"OpenAI: GPT-5.4 Mini","context_length":400000},{"id":"openai/gpt-5.3-codex","name":"OpenAI: GPT-5.3-Codex","context_length":400000},{"id":"anthropic/claude-sonnet-4.5","name":"Anthropic: Claude Sonnet 4.5","context_length":200000}]}`)
+	transformed := transformOpenRouterCodexModels(body)
+
+	var catalog struct {
+		Models []struct {
+			Slug        string `json:"slug"`
+			DisplayName string `json:"display_name"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(transformed, &catalog); err != nil {
+		t.Fatalf("unmarshal transformed catalog: %v", err)
+	}
+	if len(catalog.Models) != 3 {
+		t.Fatalf("model count = %d, want 3", len(catalog.Models))
+	}
+	seen := map[string]string{}
+	for _, model := range catalog.Models {
+		seen[model.Slug] = model.DisplayName
+	}
+	if seen["gpt-5.4-mini"] != "GPT-5.4 Mini" {
+		t.Fatalf("gpt-5.4-mini display = %q", seen["gpt-5.4-mini"])
+	}
+	if seen["gpt-5.3-codex"] != "GPT-5.3-Codex" {
+		t.Fatalf("gpt-5.3-codex display = %q", seen["gpt-5.3-codex"])
+	}
+	if seen["gpt-5.3-codex-spark"] != "gpt-5.3-codex-spark" {
+		t.Fatalf("spark display = %q", seen["gpt-5.3-codex-spark"])
+	}
+}
+
 func TestClaudeProviderParseUsageHeaders(t *testing.T) {
 	acc := &Account{Type: AccountTypeClaude}
 	provider := &ClaudeProvider{}

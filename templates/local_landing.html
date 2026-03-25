@@ -740,13 +740,9 @@ chatgpt_base_url = "${BASE_URL}/backend-api"
 
 [model_providers.codex-pool]
 name = "OpenAI via codex-pool proxy"
-base_url = "${BASE_URL}"
+base_url = "${BASE_URL}/v1"
 wire_api = "responses"
 requires_openai_auth = true
-supports_websockets = true
-
-[model_providers.codex-pool.features]
-responses_websockets_v2 = true
 EOF
 echo "Config written! Copy an auth.json from your pool folder:"
 echo "  cp pool/ACCOUNT.json ~/.codex/auth.json"`;

@@ -25,6 +25,7 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 	type row struct {
 		ID                      string      `json:"id"`
 		Type                    AccountType `json:"type"`
+		Plan                    string      `json:"plan,omitempty"`
 		PlanType                string      `json:"plan_type,omitempty"`
 		AccountID               string      `json:"account_id,omitempty"`
 		IDTokenChatGPTAccountID string      `json:"id_token_chatgpt_account_id,omitempty"`
@@ -63,6 +64,7 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 		out = append(out, row{
 			ID:                      a.ID,
 			Type:                    a.Type,
+			Plan:                    planType,
 			PlanType:                planType,
 			AccountID:               accountID,
 			IDTokenChatGPTAccountID: idTokID,

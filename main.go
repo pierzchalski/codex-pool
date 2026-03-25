@@ -422,6 +422,66 @@ func (h *proxyHandler) pickUpstream(path string, headers http.Header) (Provider,
 	return provider, provider.UpstreamURL(path)
 }
 
+type accountAwareProvider interface {
+	UpstreamURLForAccount(acc *Account, path string) *url.URL
+	NormalizePathForAccount(acc *Account, path string) string
+}
+
+func upstreamURLForAccount(provider Provider, acc *Account, path string) *url.URL {
+	if provider == nil {
+		return nil
+	}
+	if aware, ok := provider.(accountAwareProvider); ok {
+		return aware.UpstreamURLForAccount(acc, path)
+	}
+	return provider.UpstreamURL(path)
+}
+
+func normalizePathForAccount(provider Provider, acc *Account, path string) string {
+	if provider == nil {
+		return path
+	}
+	if aware, ok := provider.(accountAwareProvider); ok {
+		return aware.NormalizePathForAccount(acc, path)
+	}
+	return provider.NormalizePath(path)
+}
+
+func openRouterCodexModelID(model string) string {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" {
+		return trimmed
+	}
+	if baseName, _, hasSuffix := parseThinkingSuffix(trimmed); hasSuffix {
+		trimmed = baseName
+	}
+	if strings.EqualFold(trimmed, "gpt-5.3-codex-spark") {
+		return "openai/gpt-5.3-codex"
+	}
+	if strings.Contains(trimmed, "/") {
+		return trimmed
+	}
+	if !isOpenAIModel(trimmed) {
+		return trimmed
+	}
+	return "openai/" + trimmed
+}
+
+func rewriteCodexOpenRouterRequestModel(body []byte) []byte {
+	model := extractRequestedModelFromJSON(body)
+	if model == "" {
+		return body
+	}
+	upstreamModel := openRouterCodexModelID(model)
+	if upstreamModel == "" || upstreamModel == model {
+		return body
+	}
+	if rewritten := rewriteModelInBody(body, upstreamModel); rewritten != nil {
+		return rewritten
+	}
+	return body
+}
+
 func mapResponsesPath(in string) string {
 	if strings.HasPrefix(in, "/v1/responses/compact") || strings.HasPrefix(in, "/responses/compact") {
 		return "/responses/compact"
@@ -675,7 +735,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		if geminiAPIKey != "" {
 			if isPoolKey, uid, _ := isPoolGeminiAPIKey(secret, geminiAPIKey); isPoolKey {
 				userID = uid
-					// Check if user is disabled
+				// Check if user is disabled
 				if h.poolUsers != nil {
 					if user := h.poolUsers.Get(userID); user != nil && user.Disabled {
 						http.Error(w, "pool user disabled", http.StatusForbidden)
@@ -1152,13 +1212,16 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		removeHopByHopHeaders(w.Header())
 		h.replaceUsageHeaders(w.Header())
 
-		// Inject Claude models into model catalog response
+		// Inject synthetic catalog entries when proxying provider-specific model lists.
 		if strings.Contains(r.URL.Path, "codex/models") && resp.StatusCode == 200 {
 			w.Header().Del("Content-Length")
 			w.Header().Del("Content-Encoding") // We'll return uncompressed JSON
 			respBody, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if readErr == nil {
+				if isCodexOpenRouterAccount(acc) {
+					respBody = transformOpenRouterCodexModels(respBody)
+				}
 				modified := injectClaudeModels(respBody)
 				w.WriteHeader(resp.StatusCode)
 				w.Write(modified)
@@ -1226,7 +1289,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			w.WriteHeader(resp.StatusCode)
 			w.Write(result)
 		} else if !isSSE && translateDir != TranslateNone {
-		// Non-SSE format translation: buffer the whole body, translate, write.
+			// Non-SSE format translation: buffer the whole body, translate, write.
 			w.Header().Del("Content-Length")
 			w.Header().Set("Content-Type", "application/json")
 
@@ -1559,11 +1622,18 @@ func (h *proxyHandler) proxyRequestWebSocket(
 		return
 	}
 
+	targetBase = upstreamURLForAccount(provider, acc, r.URL.Path)
+	if targetBase == nil {
+		http.Error(w, fmt.Sprintf("no upstream for account %s", acc.ID), http.StatusServiceUnavailable)
+		return
+	}
+	normalizedPath := normalizePathForAccount(provider, acc, r.URL.Path)
+
 	outURL := new(url.URL)
 	*outURL = *r.URL
 	outURL.Scheme = targetBase.Scheme
 	outURL.Host = targetBase.Host
-	outURL.Path = singleJoin(targetBase.Path, provider.NormalizePath(r.URL.Path))
+	outURL.Path = singleJoin(targetBase.Path, normalizedPath)
 
 	// For Claude OAuth tokens, add beta=true query param (required for OAuth to work)
 	if provider.Type() == AccountTypeClaude && strings.HasPrefix(access, "sk-ant-oat") {
@@ -1797,11 +1867,18 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	targetBase = upstreamURLForAccount(provider, acc, r.URL.Path)
+	if targetBase == nil {
+		http.Error(w, fmt.Sprintf("no upstream for account %s", acc.ID), http.StatusServiceUnavailable)
+		return
+	}
+	normalizedPath := normalizePathForAccount(provider, acc, r.URL.Path)
+
 	outURL := new(url.URL)
 	*outURL = *r.URL
 	outURL.Scheme = targetBase.Scheme
 	outURL.Host = targetBase.Host
-	outURL.Path = singleJoin(targetBase.Path, provider.NormalizePath(r.URL.Path))
+	outURL.Path = singleJoin(targetBase.Path, normalizedPath)
 
 	acc.mu.Lock()
 	access := acc.AccessToken
@@ -2124,7 +2201,6 @@ func clientOrDefaultTimeout(r *http.Request, reqTimeout, streamTimeout time.Dura
 	}
 	return reqTimeout
 }
-
 
 func (h *proxyHandler) logRateLimitResponseHeaders(reqID string, accountType AccountType, hdr http.Header) {
 	if h == nil || !h.cfg.debug.Load() {
@@ -2606,12 +2682,20 @@ func (h *proxyHandler) tryOnce(
 		}
 	}
 
+	targetBase = upstreamURLForAccount(provider, acc, in.URL.Path)
+	if targetBase == nil {
+		return nil, nil, refreshFailed, fmt.Errorf("no upstream for account %s", acc.ID)
+	}
+	normalizedPath := normalizePathForAccount(provider, acc, in.URL.Path)
+	if isCodexOpenRouterAccount(acc) {
+		bodyBytes = rewriteCodexOpenRouterRequestModel(bodyBytes)
+	}
+
 	outURL := new(url.URL)
 	*outURL = *in.URL
 	outURL.Scheme = targetBase.Scheme
 	outURL.Host = targetBase.Host
-	// Use provider's NormalizePath method for path handling
-	outURL.Path = singleJoin(targetBase.Path, provider.NormalizePath(in.URL.Path))
+	outURL.Path = singleJoin(targetBase.Path, normalizedPath)
 
 	// For Claude OAuth tokens, add beta=true query param (required for OAuth to work)
 	if provider.Type() == AccountTypeClaude && strings.HasPrefix(acc.AccessToken, "sk-ant-oat") {
@@ -2881,7 +2965,6 @@ const refreshMinInterval = 5 * time.Second
 // This is persisted to disk and survives restarts, preventing hammering OAuth endpoints
 // 15 minutes balances between preventing hammering and allowing recovery from expired tokens
 const refreshPerAccountInterval = 15 * time.Minute
-
 
 func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 	if a == nil {

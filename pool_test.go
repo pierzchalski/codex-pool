@@ -76,6 +76,58 @@ func TestCandidateRequiredPlanOverridesPinnedConversation(t *testing.T) {
 	}
 }
 
+func TestCandidatePrefersCodexOAuthOverOpenRouterFallback(t *testing.T) {
+	oauth := &Account{ID: "oauth", Type: AccountTypeCodex, PlanType: "plus", Usage: UsageSnapshot{PrimaryUsedPercent: 0.4, SecondaryUsedPercent: 0.85}}
+	fallback := &Account{ID: "fallback", Type: AccountTypeCodex, Backend: AccountBackendOpenRouter, AccessToken: "or-key", PlanType: "api", Usage: UsageSnapshot{PrimaryUsedPercent: 0.0, SecondaryUsedPercent: 0.05}}
+	p := newPoolState([]*Account{fallback, oauth}, false)
+
+	got := p.candidate("", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != "oauth" {
+		t.Fatalf("expected oauth account to beat fallback, got %+v", got)
+	}
+}
+
+func TestCandidateAllowsOpenRouterForCodexProWhenNoHigherTierAvailable(t *testing.T) {
+	plus := &Account{ID: "plus", Type: AccountTypeCodex, PlanType: "plus", Usage: UsageSnapshot{PrimaryUsedPercent: 0.1}}
+	fallback := &Account{ID: "fallback", Type: AccountTypeCodex, Backend: AccountBackendOpenRouter, AccessToken: "or-key", PlanType: "api", Usage: UsageSnapshot{PrimaryUsedPercent: 0.0, SecondaryUsedPercent: 0.05}}
+	p := newPoolState([]*Account{plus, fallback}, false)
+
+	got := p.candidate("", nil, AccountTypeCodex, "pro")
+	if got == nil || got.ID != "fallback" {
+		t.Fatalf("expected fallback account for codex pro request, got %+v", got)
+	}
+}
+
+func TestCandidateUnpinsOpenRouterWhenHigherTierAvailable(t *testing.T) {
+	fallback := &Account{ID: "fallback", Type: AccountTypeCodex, Backend: AccountBackendOpenRouter, AccessToken: "or-key", PlanType: "api", Usage: UsageSnapshot{PrimaryUsedPercent: 0.0, SecondaryUsedPercent: 0.05}}
+	oauth := &Account{ID: "oauth", Type: AccountTypeCodex, PlanType: "pro", Usage: UsageSnapshot{PrimaryUsedPercent: 0.4, SecondaryUsedPercent: 0.7}}
+	p := newPoolState([]*Account{fallback, oauth}, true)
+	p.pin("c1", "fallback")
+
+	got := p.candidate("c1", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != "oauth" {
+		t.Fatalf("expected pinned fallback to be bypassed, got %+v", got)
+	}
+	if _, ok := p.convPin["c1"]; ok {
+		t.Fatalf("expected fallback pin to be cleared once better account is available")
+	}
+}
+
+func TestCandidateKeepsPinnedOpenRouterWhenOnlyFallbacksAvailable(t *testing.T) {
+	pinned := &Account{ID: "pinned", Type: AccountTypeCodex, Backend: AccountBackendOpenRouter, AccessToken: "or-key-1", PlanType: "api", Usage: UsageSnapshot{PrimaryUsedPercent: 0.4, SecondaryUsedPercent: 0.4}}
+	other := &Account{ID: "other", Type: AccountTypeCodex, Backend: AccountBackendOpenRouter, AccessToken: "or-key-2", PlanType: "api", Usage: UsageSnapshot{PrimaryUsedPercent: 0.0, SecondaryUsedPercent: 0.05}}
+	p := newPoolState([]*Account{pinned, other}, false)
+	p.pin("c1", "pinned")
+
+	got := p.candidate("c1", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != "pinned" {
+		t.Fatalf("expected pinned fallback to remain sticky within fallback tier, got %+v", got)
+	}
+	if p.convPin["c1"] != "pinned" {
+		t.Fatalf("expected fallback pin to remain unchanged")
+	}
+}
+
 func TestMergeUsagePreservesExistingFields(t *testing.T) {
 	prev := UsageSnapshot{
 		PrimaryUsedPercent:   0.2,
@@ -101,6 +153,70 @@ func TestMergeUsagePreservesExistingFields(t *testing.T) {
 	}
 	if merged.Source != "body" {
 		t.Fatalf("expected source updated, got %s", merged.Source)
+	}
+}
+
+func TestPlanMatchesRequiredAllowsCodexAPIForPro(t *testing.T) {
+	for _, plan := range []string{"api", "openrouter"} {
+		if !planMatchesRequired(plan, "pro") {
+			t.Fatalf("expected plan %q to satisfy pro requirement", plan)
+		}
+	}
+}
+
+func TestSaveAccountPreservesOpenRouterCodexFields(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "openrouter.json")
+
+	original := map[string]any{
+		"backend":        "openrouter",
+		"base_url":       "https://openrouter.ai/api/v1",
+		"plan_type":      "api",
+		"OPENAI_API_KEY": "old-key",
+		"meta": map[string]any{
+			"owner": "test",
+		},
+	}
+	buf, err := json.MarshalIndent(original, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(path, buf, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	acc := &Account{
+		Type:        AccountTypeCodex,
+		ID:          "openrouter",
+		File:        path,
+		Backend:     AccountBackendOpenRouter,
+		AccessToken: "new-key",
+		BaseURL:     "https://openrouter.ai/api/v1",
+		PlanType:    "api",
+	}
+	if err := saveAccount(acc); err != nil {
+		t.Fatalf("saveAccount: %v", err)
+	}
+
+	afterRaw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var after map[string]any
+	if err := json.Unmarshal(afterRaw, &after); err != nil {
+		t.Fatalf("unmarshal after: %v", err)
+	}
+	if after["OPENAI_API_KEY"] != "new-key" {
+		t.Fatalf("OPENAI_API_KEY = %v", after["OPENAI_API_KEY"])
+	}
+	if after["backend"] != "openrouter" {
+		t.Fatalf("backend = %v", after["backend"])
+	}
+	if after["plan_type"] != "api" {
+		t.Fatalf("plan_type = %v", after["plan_type"])
+	}
+	if _, ok := after["meta"]; !ok {
+		t.Fatalf("expected meta preserved")
 	}
 }
 

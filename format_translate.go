@@ -34,12 +34,12 @@ func (f RequestFormat) String() string {
 type TranslateDirection int
 
 const (
-	TranslateNone            TranslateDirection = iota
-	TranslateClaudeToOAI                        // Client sent Claude format, upstream expects OpenAI Chat Completions
-	TranslateOAIToClaude                        // Client sent OpenAI format, upstream expects Claude
-	TranslateChatToResponses                    // Client sent Chat Completions, upstream expects Responses API
-	TranslateResponsesToClaude                  // Client sent Responses API, upstream expects Claude Messages
-	TranslateClaudeToResponses                  // Client sent Claude format, upstream expects Responses API
+	TranslateNone              TranslateDirection = iota
+	TranslateClaudeToOAI                          // Client sent Claude format, upstream expects OpenAI Chat Completions
+	TranslateOAIToClaude                          // Client sent OpenAI format, upstream expects Claude
+	TranslateChatToResponses                      // Client sent Chat Completions, upstream expects Responses API
+	TranslateResponsesToClaude                    // Client sent Responses API, upstream expects Claude Messages
+	TranslateClaudeToResponses                    // Client sent Claude format, upstream expects Responses API
 )
 
 // detectRequestFormat determines the API format from the request path.
@@ -1328,36 +1328,36 @@ func logTranslation(reqID string, direction TranslateDirection, debug bool) {
 
 func claudeModelEntry(slug, displayName string, contextWindow int) map[string]any {
 	return map[string]any{
-		"slug":                          slug,
-		"display_name":                  displayName,
-		"description":                   displayName + " via Codex Pool",
-		"prefer_websockets":             false,
-		"support_verbosity":             false,
-		"default_verbosity":             nil,
-		"default_reasoning_level":       "high",
-		"default_reasoning_summary":     "none",
+		"slug":                           slug,
+		"display_name":                   displayName,
+		"description":                    displayName + " via Codex Pool",
+		"prefer_websockets":              false,
+		"support_verbosity":              false,
+		"default_verbosity":              nil,
+		"default_reasoning_level":        "high",
+		"default_reasoning_summary":      "none",
 		"apply_patch_tool_type":          "freeform",
 		"web_search_tool_type":           "text",
-		"shell_type":                    "shell_command",
-		"input_modalities":              []string{"text", "image"},
+		"shell_type":                     "shell_command",
+		"input_modalities":               []string{"text", "image"},
 		"supports_image_detail_original": false,
-		"supports_parallel_tool_calls":  true,
-		"supports_reasoning_summaries":  false,
-		"supports_search_tool":          false,
-		"supported_in_api":              true,
-		"supported_reasoning_levels":    []any{},
-		"experimental_supported_tools":  []any{},
-		"truncation_policy":             map[string]any{"mode": "tokens", "limit": 10000},
-		"context_window":                contextWindow,
-		"priority":                      100,
-		"visibility":                    "list",
-		"availability_nux":              nil,
-		"available_in_plans":            []string{"plus", "pro", "team", "enterprise", "business"},
-		"minimal_client_version":        "0.1.0",
-		"reasoning_summary_format":      "none",
-		"model_messages":                nil,
-		"base_instructions":             "",
-		"upgrade":                       nil,
+		"supports_parallel_tool_calls":   true,
+		"supports_reasoning_summaries":   false,
+		"supports_search_tool":           false,
+		"supported_in_api":               true,
+		"supported_reasoning_levels":     []any{},
+		"experimental_supported_tools":   []any{},
+		"truncation_policy":              map[string]any{"mode": "tokens", "limit": 10000},
+		"context_window":                 contextWindow,
+		"priority":                       100,
+		"visibility":                     "list",
+		"availability_nux":               nil,
+		"available_in_plans":             []string{"plus", "pro", "team", "enterprise", "business"},
+		"minimal_client_version":         "0.1.0",
+		"reasoning_summary_format":       "none",
+		"model_messages":                 nil,
+		"base_instructions":              "",
+		"upgrade":                        nil,
 	}
 }
 
@@ -1399,6 +1399,115 @@ func injectClaudeModels(body []byte) []byte {
 	catalog["models"] = models
 
 	out, err := json.Marshal(catalog)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+type openRouterModelCatalog struct {
+	Data []openRouterModel `json:"data"`
+}
+
+type openRouterModel struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	ContextLength int    `json:"context_length"`
+}
+
+func openRouterCodexModelEntry(slug, displayName string, contextWindow int) map[string]any {
+	if displayName == "" {
+		displayName = slug
+	}
+	if contextWindow <= 0 {
+		contextWindow = 272000
+	}
+	return map[string]any{
+		"slug":                           slug,
+		"display_name":                   displayName,
+		"description":                    displayName + " via OpenRouter",
+		"prefer_websockets":              false,
+		"support_verbosity":              true,
+		"default_verbosity":              "low",
+		"default_reasoning_level":        "medium",
+		"default_reasoning_summary":      "none",
+		"apply_patch_tool_type":          "freeform",
+		"web_search_tool_type":           "text",
+		"shell_type":                     "shell_command",
+		"input_modalities":               []string{"text", "image"},
+		"supports_image_detail_original": true,
+		"supports_parallel_tool_calls":   true,
+		"supports_reasoning_summaries":   true,
+		"supports_search_tool":           true,
+		"supported_in_api":               true,
+		"supported_reasoning_levels": []map[string]any{
+			{"effort": "low", "description": "Fast responses with lighter reasoning"},
+			{"effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks"},
+			{"effort": "high", "description": "Greater reasoning depth for complex problems"},
+			{"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
+		},
+		"experimental_supported_tools": []any{},
+		"truncation_policy":            map[string]any{"mode": "tokens", "limit": 10000},
+		"context_window":               contextWindow,
+		"priority":                     50,
+		"visibility":                   "list",
+		"availability_nux":             nil,
+		"minimal_client_version":       "0.1.0",
+		"reasoning_summary_format":     "none",
+		"model_messages":               nil,
+		"base_instructions":            "",
+		"upgrade":                      nil,
+	}
+}
+
+func transformOpenRouterCodexModels(body []byte) []byte {
+	actualBody := body
+	if len(body) > 2 && body[0] == 0x1f && body[1] == 0x8b {
+		gr, err := gzip.NewReader(bytes.NewReader(body))
+		if err == nil {
+			decompressed, err := io.ReadAll(gr)
+			gr.Close()
+			if err == nil {
+				actualBody = decompressed
+			}
+		}
+	}
+
+	var catalog openRouterModelCatalog
+	if err := json.Unmarshal(actualBody, &catalog); err != nil {
+		return body
+	}
+
+	models := make([]any, 0, len(catalog.Data)+1)
+	seen := map[string]bool{}
+	addModel := func(slug, displayName string, contextWindow int) {
+		if slug == "" || seen[slug] {
+			return
+		}
+		models = append(models, openRouterCodexModelEntry(slug, displayName, contextWindow))
+		seen[slug] = true
+	}
+
+	for _, model := range catalog.Data {
+		if !strings.HasPrefix(model.ID, "openai/") {
+			continue
+		}
+		slug := strings.TrimPrefix(model.ID, "openai/")
+		if !isOpenAIModel(slug) {
+			continue
+		}
+		displayName := strings.TrimSpace(strings.TrimPrefix(model.Name, "OpenAI: "))
+		addModel(slug, displayName, model.ContextLength)
+		if slug == "gpt-5.3-codex" {
+			addModel("gpt-5.3-codex-spark", "gpt-5.3-codex-spark", model.ContextLength)
+		}
+	}
+
+	if len(models) == 0 {
+		return body
+	}
+
+	out, err := json.Marshal(map[string]any{"models": models})
 	if err != nil {
 		return body
 	}

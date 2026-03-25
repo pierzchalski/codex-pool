@@ -293,6 +293,9 @@ if ($PSVersionTable.PSEdition -eq 'Desktop') {
 Set-Utf8NoBom -Path $authFile -Value $authContent
 
 Write-Host '2. Fetching model catalog...'
+if (-not (Test-Path $modelCatalog)) {
+  Set-Utf8NoBom -Path $modelCatalog -Value '{"models":[]}'
+}
 try {
   $raw = Get-Content -Path $authFile -Raw
   $auth = $raw | ConvertFrom-JsonCompat
@@ -534,13 +537,9 @@ $existing
 
 [model_providers.codex-pool]
 name = "OpenAI via codex-pool proxy"
-base_url = "$BaseUrl"
+base_url = "$BaseUrl/v1"
 wire_api = "responses"
 requires_openai_auth = true
-supports_websockets = true
-
-[model_providers.codex-pool.features]
-responses_websockets_v2 = true
 
 [mcp_servers.model_sync]
 command = "$mcpCommandToml"
@@ -561,6 +560,57 @@ args = ["-NoLogo", "-NoProfile", "-File", "$mcpScriptToml", "$BaseUrl"]
     $existing = $existing -replace '(?m)^\[mcp_servers\.codex_pool_model_sync\]', '[mcp_servers.model_sync]'
     $updated = $true
   }
+
+  $lines = $existing -split "\r?\n"
+  $rewrittenLines = New-Object 'System.Collections.Generic.List[string]'
+  $inCodexPool = $false
+  $skipCodexPoolFeatures = $false
+
+  foreach ($line in $lines) {
+    if ($skipCodexPoolFeatures) {
+      if ($line -match '^\[') {
+        $skipCodexPoolFeatures = $false
+      } else {
+        $updated = $true
+        continue
+      }
+    }
+
+    if ($line -match '^\[model_providers\.codex-pool\.features\]') {
+      $skipCodexPoolFeatures = $true
+      $inCodexPool = $false
+      $updated = $true
+      continue
+    }
+
+    if ($line -match '^\[model_providers\.codex-pool\]') {
+      $inCodexPool = $true
+      $rewrittenLines.Add($line)
+      continue
+    }
+
+    if ($line -match '^\[') {
+      $inCodexPool = $false
+    }
+
+    if ($inCodexPool -and $line -match '^[ \t]*base_url[ \t]*=') {
+      $desired = 'base_url = "' + $BaseUrl + '/v1"'
+      if ($line -ne $desired) {
+        $updated = $true
+      }
+      $rewrittenLines.Add($desired)
+      continue
+    }
+
+    if ($inCodexPool -and $line -match '^[ \t]*supports_websockets[ \t]*=') {
+      $updated = $true
+      continue
+    }
+
+    $rewrittenLines.Add($line)
+  }
+
+  $existing = $rewrittenLines -join $nl
 
   if ($existing -notmatch '(?m)^\[mcp_servers\.model_sync\]') {
     $existing = $existing.TrimEnd() +
@@ -605,6 +655,10 @@ curl -sL "$BASE_URL/config/codex/$TOKEN" -o "$AUTH_FILE"
 chmod 600 "$AUTH_FILE"
 
 echo "2. Fetching model catalog..."
+if [ ! -f "$MODEL_CATALOG" ]; then
+    printf '%%s\n' '{"models":[]}' > "$MODEL_CATALOG"
+    chmod 600 "$MODEL_CATALOG"
+fi
 ACCESS_TOKEN=$(sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$AUTH_FILE" | head -n 1)
 if [ -n "${ACCESS_TOKEN:-}" ]; then
     curl --connect-timeout 5 --max-time 10 -fsSL \
@@ -768,13 +822,9 @@ EOF
 
 [model_providers.codex-pool]
 name = "OpenAI via codex-pool proxy"
-base_url = "$BASE_URL"
+base_url = "$BASE_URL/v1"
 wire_api = "responses"
 requires_openai_auth = true
-supports_websockets = true
-
-[model_providers.codex-pool.features]
-responses_websockets_v2 = true
 
 [mcp_servers.model_sync]
 command = "bash"
@@ -795,6 +845,46 @@ EOF
         cat "$CONFIG_FILE" >> "$TEMP_FILE"
         mv "$TEMP_FILE" "$CONFIG_FILE"
         UPDATED=1
+    fi
+
+    TEMP_FILE=$(mktemp)
+    awk -v new_base_url="${BASE_URL}/v1" '
+BEGIN { in_codex = 0; skip_features = 0 }
+skip_features {
+    if ($0 ~ /^\[/) {
+        skip_features = 0
+    } else {
+        next
+    }
+}
+/^\[model_providers\.codex-pool\.features\]$/ {
+    skip_features = 1
+    next
+}
+/^\[model_providers\.codex-pool\]$/ {
+    in_codex = 1
+    print
+    next
+}
+/^\[/ {
+    in_codex = 0
+}
+in_codex && /^[[:space:]]*base_url[[:space:]]*=/ {
+    print "base_url = \"" new_base_url "\""
+    next
+}
+in_codex && /^[[:space:]]*supports_websockets[[:space:]]*=/ {
+    next
+}
+{
+    print
+}
+' "$CONFIG_FILE" > "$TEMP_FILE"
+    if ! cmp -s "$CONFIG_FILE" "$TEMP_FILE"; then
+        mv "$TEMP_FILE" "$CONFIG_FILE"
+        UPDATED=1
+    else
+        rm -f "$TEMP_FILE"
     fi
 
     if grep -q '^\[mcp_servers\.codex_pool_model_sync\]' "$CONFIG_FILE"; then

@@ -1535,13 +1535,9 @@ model_catalog_json = "~/.codex/model_catalog.json"
 
 [model_providers.codex-pool]
 name = "OpenAI via codex-pool proxy"
-base_url = "${publicUrl}"
+base_url = "${publicUrl}/v1"
 wire_api = "responses"
 requires_openai_auth = true
-supports_websockets = true
-
-[model_providers.codex-pool.features]
-responses_websockets_v2 = true
 
 [mcp_servers.model_sync]
 command = "bash"
@@ -1714,13 +1710,9 @@ model_catalog_json = "~/.codex/model_catalog.json"
 
 [model_providers.codex-pool]
 name = "OpenAI via codex-pool proxy"
-base_url = "${result.public_url}"
+base_url = "${result.public_url}/v1"
 wire_api = "responses"
 requires_openai_auth = true
-supports_websockets = true
-
-[model_providers.codex-pool.features]
-responses_websockets_v2 = true
 
 [mcp_servers.model_sync]
 command = "bash"

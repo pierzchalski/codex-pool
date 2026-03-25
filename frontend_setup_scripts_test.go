@@ -32,6 +32,15 @@ func TestServeCodexSetupScript_PowerShell(t *testing.T) {
 	if !strings.Contains(body, "model_catalog_json = ") {
 		t.Fatalf("expected model catalog config in script body, got:\n%s", body)
 	}
+	if !strings.Contains(body, "{\"models\":[]}") {
+		t.Fatalf("expected placeholder model catalog creation in PowerShell setup, got:\n%s", body)
+	}
+	if !strings.Contains(body, "base_url = \"$BaseUrl/v1\"") {
+		t.Fatalf("expected Codex provider to use /v1 base URL, got:\n%s", body)
+	}
+	if strings.Contains(body, "supports_websockets = true") {
+		t.Fatalf("expected websocket flags to be omitted from PowerShell setup, got:\n%s", body)
+	}
 	if !strings.Contains(body, "[mcp_servers.model_sync]") {
 		t.Fatalf("expected MCP sidecar config in script body, got:\n%s", body)
 	}
@@ -62,6 +71,15 @@ func TestServeCodexSetupScript_Bash(t *testing.T) {
 	}
 	if !strings.Contains(body, "model_catalog_json = ") {
 		t.Fatalf("expected model catalog config in bash script body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "{\"models\":[]}") {
+		t.Fatalf("expected placeholder model catalog creation in bash setup, got:\n%s", body)
+	}
+	if !strings.Contains(body, "base_url = \"$BASE_URL/v1\"") {
+		t.Fatalf("expected Codex provider to use /v1 base URL, got:\n%s", body)
+	}
+	if strings.Contains(body, "supports_websockets = true") {
+		t.Fatalf("expected websocket flags to be omitted from bash setup, got:\n%s", body)
 	}
 	if !strings.Contains(body, "[mcp_servers.model_sync]") {
 		t.Fatalf("expected MCP sidecar config in bash script body, got:\n%s", body)

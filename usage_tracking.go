@@ -58,6 +58,9 @@ func (h *proxyHandler) pollUpstreamUsage() {
 		if !rateLimitUntil.IsZero() && rateLimitUntil.After(now) {
 			continue
 		}
+		if accType == AccountTypeCodex && isCodexOpenRouterAccount(a) {
+			continue
+		}
 
 		// Gemini accounts don't have WHAM usage endpoint, but still need refresh
 		if accType == AccountTypeGemini {
@@ -145,6 +148,9 @@ func (h *proxyHandler) pollUpstreamUsage() {
 }
 
 func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
+	if isCodexOpenRouterAccount(a) {
+		return nil
+	}
 	// Proactively refresh expired tokens before making the request.
 	// This ensures tokens stay fresh even if access tokens outlive ID token expiry.
 	if !h.cfg.disableRefresh && h.needsRefresh(a) {

@@ -32,6 +32,66 @@ func NewCodexProvider(responsesBase, whamBase, refreshBase *url.URL) *CodexProvi
 	}
 }
 
+const defaultCodexOpenRouterBaseURL = "https://openrouter.ai/api/v1"
+
+func isCodexOpenRouterAccount(acc *Account) bool {
+	return acc != nil && acc.Type == AccountTypeCodex && acc.Backend == AccountBackendOpenRouter && strings.TrimSpace(acc.AccessToken) != ""
+}
+
+func codexOpenRouterBaseURL(raw string) *url.URL {
+	candidate := strings.TrimSpace(raw)
+	if candidate == "" {
+		candidate = defaultCodexOpenRouterBaseURL
+	}
+	u, err := url.Parse(candidate)
+	if err == nil && u != nil && u.Scheme != "" && u.Host != "" {
+		return u
+	}
+	fallback, _ := url.Parse(defaultCodexOpenRouterBaseURL)
+	return fallback
+}
+
+func normalizeCodexOpenRouterPath(path string) string {
+	if strings.HasPrefix(path, "/backend-api/codex") {
+		trimmed := strings.TrimPrefix(path, "/backend-api/codex")
+		if trimmed == "" {
+			return "/"
+		}
+		if !strings.HasPrefix(trimmed, "/") {
+			trimmed = "/" + trimmed
+		}
+		if strings.HasPrefix(trimmed, "/responses") {
+			return mapResponsesPath(trimmed)
+		}
+		return trimmed
+	}
+	if strings.HasPrefix(path, "/v1/responses") || strings.HasPrefix(path, "/responses") {
+		return mapResponsesPath(path)
+	}
+	if strings.HasPrefix(path, "/backend-api/") {
+		trimmed := strings.TrimPrefix(path, "/backend-api")
+		if trimmed == "" {
+			return "/"
+		}
+		return trimmed
+	}
+	return path
+}
+
+func (p *CodexProvider) UpstreamURLForAccount(acc *Account, path string) *url.URL {
+	if isCodexOpenRouterAccount(acc) {
+		return codexOpenRouterBaseURL(acc.BaseURL)
+	}
+	return p.UpstreamURL(path)
+}
+
+func (p *CodexProvider) NormalizePathForAccount(acc *Account, path string) string {
+	if isCodexOpenRouterAccount(acc) {
+		return normalizeCodexOpenRouterPath(path)
+	}
+	return p.NormalizePath(path)
+}
+
 func (p *CodexProvider) Type() AccountType {
 	return AccountTypeCodex
 }
@@ -41,17 +101,47 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 	if err := json.Unmarshal(data, &aj); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+
+	acc := &Account{
+		Type: AccountTypeCodex,
+		ID:   strings.TrimSuffix(name, filepath.Ext(name)),
+		File: path,
+		Dead: aj.Dead,
+	}
+
+	if aj.LastRefresh != nil {
+		acc.LastRefresh = *aj.LastRefresh
+	}
+
+	openAIKey := ""
+	if aj.OpenAIKey != nil {
+		openAIKey = strings.TrimSpace(*aj.OpenAIKey)
+	}
+	backend := strings.ToLower(strings.TrimSpace(aj.Backend))
+	if backend == string(AccountBackendOpenRouter) || (backend == "" && openAIKey != "" && aj.Tokens == nil) {
+		if openAIKey == "" {
+			return nil, nil
+		}
+		acc.Backend = AccountBackendOpenRouter
+		acc.AccessToken = openAIKey
+		acc.BaseURL = strings.TrimSpace(aj.BaseURL)
+		if acc.BaseURL == "" {
+			acc.BaseURL = defaultCodexOpenRouterBaseURL
+		}
+		acc.PlanType = strings.TrimSpace(aj.PlanType)
+		if acc.PlanType == "" {
+			acc.PlanType = "api"
+		}
+		return acc, nil
+	}
+
 	if aj.Tokens == nil {
 		return nil, nil
 	}
-	acc := &Account{
-		Type:         AccountTypeCodex,
-		ID:           strings.TrimSuffix(name, filepath.Ext(name)),
-		File:         path,
-		AccessToken:  aj.Tokens.AccessToken,
-		RefreshToken: aj.Tokens.RefreshToken,
-		IDToken:      aj.Tokens.IDToken,
-	}
+
+	acc.AccessToken = aj.Tokens.AccessToken
+	acc.RefreshToken = aj.Tokens.RefreshToken
+	acc.IDToken = aj.Tokens.IDToken
 	if aj.Tokens.AccountID != nil {
 		acc.AccountID = strings.TrimSpace(*aj.Tokens.AccountID)
 	}
@@ -65,15 +155,15 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 	if acc.ExpiresAt.IsZero() && aj.LastRefresh != nil {
 		acc.ExpiresAt = aj.LastRefresh.Add(20 * time.Hour)
 	}
-	if aj.LastRefresh != nil {
-		acc.LastRefresh = *aj.LastRefresh
-	}
-	acc.Dead = aj.Dead
 	return acc, nil
 }
 
 func (p *CodexProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 	req.Header.Set("Authorization", "Bearer "+acc.AccessToken)
+	if isCodexOpenRouterAccount(acc) {
+		req.Header.Del("ChatGPT-Account-ID")
+		return
+	}
 	// ChatGPT Account ID needed for some endpoints
 	chatgptAccID := acc.AccountID
 	if chatgptAccID == "" {
@@ -85,6 +175,10 @@ func (p *CodexProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 }
 
 func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error {
+	if isCodexOpenRouterAccount(acc) {
+		return nil
+	}
+
 	acc.mu.Lock()
 	refreshTok := acc.RefreshToken
 	acc.mu.Unlock()

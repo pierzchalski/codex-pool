@@ -23,13 +23,21 @@ const (
 	AccountTypeMinimax AccountType = "minimax"
 )
 
+type AccountBackend string
+
+const (
+	AccountBackendOpenRouter AccountBackend = "openrouter"
+)
+
 type Account struct {
 	mu sync.Mutex
 
 	Type         AccountType // codex, gemini, or claude
+	Backend      AccountBackend
 	ID           string
 	File         string
 	Label        string
+	BaseURL      string
 	AccessToken  string
 	RefreshToken string
 	IDToken      string
@@ -245,6 +253,9 @@ type CodexAuthJSON struct {
 	OpenAIKey   *string    `json:"OPENAI_API_KEY"`
 	Tokens      *TokenData `json:"tokens"`
 	LastRefresh *time.Time `json:"last_refresh"`
+	Backend     string     `json:"backend,omitempty"`
+	BaseURL     string     `json:"base_url,omitempty"`
+	PlanType    string     `json:"plan_type,omitempty"`
 	Dead        bool       `json:"dead"`
 }
 
@@ -373,28 +384,41 @@ func (p *poolState) count() int {
 	return len(p.accounts)
 }
 
-// accountTier returns the preference tier for an account (1 = best, 2 = lesser).
-// Tier 1: max for Claude, pro for Codex, ultra for Gemini
-// Tier 2: everything else
-func accountTier(accType AccountType, planType string) int {
-	switch accType {
-	case AccountTypeClaude:
-		if planType == "max" {
-			return 1
-		}
-		return 2
-	case AccountTypeCodex:
-		if planType == "pro" {
-			return 1
-		}
-		return 2
-	case AccountTypeGemini:
-		if planType == "ultra" {
-			return 1
-		}
-		return 2
+const (
+	accountTierPreferred = 1
+	accountTierStandard  = 2
+	accountTierFallback  = 3
+)
+
+// accountTier returns the preference tier for an account (1 = best, 3 = fallback).
+// Tier 1: Claude max, Codex pro, Gemini ultra
+// Tier 2: other first-party/OAuth accounts
+// Tier 3: explicit fallback backends such as Codex OpenRouter
+func accountTier(a *Account) int {
+	if a == nil {
+		return accountTierStandard
 	}
-	return 2
+	switch a.Type {
+	case AccountTypeClaude:
+		if a.PlanType == "max" {
+			return accountTierPreferred
+		}
+		return accountTierStandard
+	case AccountTypeCodex:
+		if isCodexOpenRouterAccount(a) {
+			return accountTierFallback
+		}
+		if a.PlanType == "pro" {
+			return accountTierPreferred
+		}
+		return accountTierStandard
+	case AccountTypeGemini:
+		if a.PlanType == "ultra" {
+			return accountTierPreferred
+		}
+		return accountTierStandard
+	}
+	return accountTierStandard
 }
 
 // nearestCooldown returns how long until the next rate-limited account of the
@@ -430,12 +454,11 @@ func (p *poolState) nearestCooldown(accountType AccountType, exclude map[string]
 // If accountType is empty, all account types are considered.
 //
 // Selection strategy:
-//  1. Conversation pinning (stickiness) — only unpin at hard limits
-//  2. Split eligible accounts into Tier 1 and Tier 2
-//  3. If any Tier 1 account has secondary < tierThreshold → pick best Tier 1 below threshold
-//  4. Else if Tier 1 accounts exist above threshold → still prefer best Tier 1 by score
-//     (only fall to Tier 2 if it has significantly better score)
-//  5. Else pick best Tier 2 by threshold then score
+//  1. Conversation pinning (stickiness), except tier-3 fallback pins yield to any better tier
+//  2. Split eligible accounts into Tier 1, Tier 2, and Tier 3 fallback candidates
+//  3. Prefer Tier 1 below threshold, then Tier 1 by score (with existing Tier 2 escape hatch)
+//  4. If no Tier 1 exists, prefer Tier 2 below threshold, then Tier 2 by score
+//  5. Only use Tier 3 fallback accounts when no Tier 1 or Tier 2 candidate is eligible
 //  6. Within a tier, use score as tiebreaker (headroom, drain urgency, recency, inflight)
 //  7. If all non-codex candidates are rate-limited, pick the best rate-limited account as fallback
 //     to avoid hard 503 failures during transient exhaustion.
@@ -445,56 +468,57 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 
 	now := time.Now()
 
+	pinnedID := ""
+	pinnedUsable := false
+
 	// Conversation pinning — keep using the same account unless at hard limits
+	// or a tier-3 fallback pin can be upgraded to a better tier.
 	if conversationID != "" {
 		if id, ok := p.convPin[conversationID]; ok {
 			if exclude != nil && exclude[id] {
 				// pinned excluded; fall through to selection
 			} else if a := p.getLocked(id); a != nil {
 				a.mu.Lock()
-				ok := !a.Dead && !a.Disabled && (accountType == "" || a.Type == accountType) && planMatchesRequired(a.PlanType, requiredPlan)
-				if ok && a.Type != AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
-					ok = false
+				pinnedUsable = !a.Dead && !a.Disabled && (accountType == "" || a.Type == accountType) && planMatchesRequired(a.PlanType, requiredPlan)
+				if pinnedUsable && a.Type != AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
+					pinnedUsable = false
 					if p.debug {
 						log.Printf("unpinning conversation %s from rate-limited account %s (until %s)",
 							conversationID, id, a.RateLimitUntil.Format(time.RFC3339))
 					}
-				} else if ok && a.Type == AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
+				} else if pinnedUsable && a.Type == AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
 					if p.debug {
 						log.Printf("ignoring rate limit for codex account %s (until %s)",
 							id, a.RateLimitUntil.Format(time.RFC3339))
 					}
 				}
-				// Unpin at 95% secondary (raised from 90% for better stickiness)
 				secondaryUsed := accountSecondaryUsageLocked(a)
-				if ok && secondaryUsed >= secondaryHardExcludeThreshold {
-					ok = false
+				if pinnedUsable && secondaryUsed >= secondaryHardExcludeThreshold {
+					pinnedUsable = false
 					if p.debug {
 						log.Printf("unpinning conversation %s from exhausted account %s (%.0f%% secondary >= %.0f%%)",
 							conversationID, id, secondaryUsed*100, secondaryHardExcludeThreshold*100)
 					}
 				}
-				// Also unpin if primary usage is at/above 95% (hard limit)
 				primaryUsed := accountPrimaryUsageLocked(a)
-				if ok && primaryUsed >= primaryHardExcludeThreshold {
-					ok = false
+				if pinnedUsable && primaryUsed >= primaryHardExcludeThreshold {
+					pinnedUsable = false
 					if p.debug {
 						log.Printf("unpinning conversation %s from account %s (%.0f%% primary >= %.0f%%)",
 							conversationID, id, primaryUsed*100, primaryHardExcludeThreshold*100)
 					}
 				}
-				// Also unpin if token is expired - don't wait for a failed request
-				if ok && !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now) {
-					ok = false
+				if pinnedUsable && !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now) {
+					pinnedUsable = false
 					if p.debug {
 						log.Printf("unpinning conversation %s from expired account %s",
 							conversationID, id)
 					}
 				}
-				a.mu.Unlock()
-				if ok {
-					return a
+				if pinnedUsable {
+					pinnedID = id
 				}
+				a.mu.Unlock()
 			}
 		}
 	}
@@ -504,7 +528,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 		return nil
 	}
 
-	// Collect eligible accounts with their tier and score
+	// Collect eligible accounts with their tier and score.
 	type scoredAccount struct {
 		acc          *Account
 		tier         int
@@ -527,7 +551,7 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 		}
 		if a.Type != AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
 			secondaryUsed := accountSecondaryUsageLocked(a)
-			tier := accountTier(a.Type, a.PlanType)
+			tier := accountTier(a)
 			score := scoreAccountLocked(a, now)
 			a.mu.Unlock()
 			// Prefer less-loaded accounts
@@ -543,7 +567,6 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 				log.Printf("ignoring rate limit for codex account %s (until %s)", a.ID, a.RateLimitUntil.Format(time.RFC3339))
 			}
 		}
-		// Hard exclusion: >=95% primary usage
 		primaryUsed := accountPrimaryUsageLocked(a)
 		if primaryUsed >= primaryHardExcludeThreshold {
 			a.mu.Unlock()
@@ -552,7 +575,6 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			}
 			continue
 		}
-		// Hard exclusion: >=99% secondary usage
 		secondaryUsed := accountSecondaryUsageLocked(a)
 		if secondaryUsed >= secondaryHardExcludeThreshold {
 			a.mu.Unlock()
@@ -561,88 +583,12 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 			}
 			continue
 		}
-		tier := accountTier(a.Type, a.PlanType)
+		tier := accountTier(a)
 		score := scoreAccountLocked(a, now)
 		a.mu.Unlock()
 		// Prefer less-loaded accounts
 		score -= float64(atomic.LoadInt64(&a.Inflight)) * 0.02
 		eligible = append(eligible, scoredAccount{acc: a, tier: tier, secondaryPct: secondaryUsed, score: score})
-	}
-
-	selectCandidate := func(accounts []scoredAccount) *Account {
-		threshold := p.tierThreshold
-		// Try Tier 1 accounts below threshold
-		var bestTier1Below *scoredAccount
-		var bestTier1Any *scoredAccount
-		for i := range accounts {
-			sa := &accounts[i]
-			if sa.tier == 1 {
-				if bestTier1Any == nil || sa.score > bestTier1Any.score {
-					bestTier1Any = sa
-				}
-				if sa.secondaryPct < threshold {
-					if bestTier1Below == nil || sa.score > bestTier1Below.score {
-						bestTier1Below = sa
-					}
-				}
-			}
-		}
-		if bestTier1Below != nil {
-			p.rr++
-			return bestTier1Below.acc
-		}
-
-		// Try Tier 2 accounts below threshold
-		var bestTier2Below *scoredAccount
-		var bestTier2Any *scoredAccount
-		for i := range accounts {
-			sa := &accounts[i]
-			if sa.tier == 2 {
-				if bestTier2Any == nil || sa.score > bestTier2Any.score {
-					bestTier2Any = sa
-				}
-				if sa.secondaryPct < threshold {
-					if bestTier2Below == nil || sa.score > bestTier2Below.score {
-						bestTier2Below = sa
-					}
-				}
-			}
-		}
-
-		// If tier 1 accounts exist above threshold, prefer them over tier 2 below threshold.
-		// Only fall to tier 2 if no tier 1 accounts at all.
-		if bestTier1Any != nil {
-			// Tier 1 exists but all above threshold. Still prefer tier 1 by score
-			// unless a tier 2 below threshold has significantly better score.
-			if bestTier2Below != nil && bestTier2Below.score > bestTier1Any.score+0.3 {
-				p.rr++
-				return bestTier2Below.acc
-			}
-			p.rr++
-			return bestTier1Any.acc
-		}
-		if bestTier2Below != nil {
-			p.rr++
-			return bestTier2Below.acc
-		}
-		if bestTier2Any != nil {
-			p.rr++
-			return bestTier2Any.acc
-		}
-
-		// Absolute fallback — pick the one with highest score (most headroom)
-		var bestAll *scoredAccount
-		for i := range accounts {
-			sa := &accounts[i]
-			if bestAll == nil || sa.score > bestAll.score {
-				bestAll = sa
-			}
-		}
-		if bestAll != nil {
-			p.rr++
-			return bestAll.acc
-		}
-		return nil
 	}
 
 	if len(eligible) == 0 {
@@ -652,14 +598,111 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 		return nil
 	}
 
-	return selectCandidate(eligible)
+	bestForTier := func(accounts []scoredAccount, tier int, threshold float64) (below, any *scoredAccount) {
+		for i := range accounts {
+			sa := &accounts[i]
+			if sa.tier != tier {
+				continue
+			}
+			if any == nil || sa.score > any.score {
+				any = sa
+			}
+			if sa.secondaryPct < threshold {
+				if below == nil || sa.score > below.score {
+					below = sa
+				}
+			}
+		}
+		return below, any
+	}
+
+	selectCandidate := func(accounts []scoredAccount) *scoredAccount {
+		threshold := p.tierThreshold
+
+		bestTier1Below, bestTier1Any := bestForTier(accounts, accountTierPreferred, threshold)
+		if bestTier1Below != nil {
+			return bestTier1Below
+		}
+
+		bestTier2Below, bestTier2Any := bestForTier(accounts, accountTierStandard, threshold)
+		if bestTier1Any != nil {
+			if bestTier2Below != nil && bestTier2Below.score > bestTier1Any.score+0.3 {
+				return bestTier2Below
+			}
+			return bestTier1Any
+		}
+		if bestTier2Below != nil {
+			return bestTier2Below
+		}
+		if bestTier2Any != nil {
+			return bestTier2Any
+		}
+
+		bestTier3Below, bestTier3Any := bestForTier(accounts, accountTierFallback, threshold)
+		if bestTier3Below != nil {
+			return bestTier3Below
+		}
+		if bestTier3Any != nil {
+			return bestTier3Any
+		}
+
+		var bestAll *scoredAccount
+		for i := range accounts {
+			sa := &accounts[i]
+			if bestAll == nil || sa.score > bestAll.score {
+				bestAll = sa
+			}
+		}
+		return bestAll
+	}
+
+	findCandidate := func(accounts []scoredAccount, id string) *scoredAccount {
+		for i := range accounts {
+			if accounts[i].acc.ID == id {
+				return &accounts[i]
+			}
+		}
+		return nil
+	}
+
+	best := selectCandidate(eligible)
+	if pinnedUsable && pinnedID != "" {
+		if pinned := findCandidate(eligible, pinnedID); pinned != nil {
+			if pinned.tier == accountTierFallback && best != nil && best.acc.ID != pinned.acc.ID && best.tier < pinned.tier {
+				delete(p.convPin, conversationID)
+				if p.debug {
+					log.Printf("unpinning conversation %s from fallback account %s: better account %s (tier %d) available",
+						conversationID, pinned.acc.ID, best.acc.ID, best.tier)
+				}
+			} else {
+				return pinned.acc
+			}
+		}
+	}
+
+	if best != nil {
+		p.rr++
+		return best.acc
+	}
+	return nil
 }
 
 func planMatchesRequired(planType, requiredPlan string) bool {
 	if requiredPlan == "" {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(planType), strings.TrimSpace(requiredPlan))
+	plan := strings.ToLower(strings.TrimSpace(planType))
+	required := strings.ToLower(strings.TrimSpace(requiredPlan))
+	if plan == required {
+		return true
+	}
+	if required == "pro" {
+		switch plan {
+		case "api", "openrouter":
+			return true
+		}
+	}
+	return false
 }
 
 // countByType returns the number of accounts of a given type (or all if empty).
@@ -921,9 +964,9 @@ func saveAccount(a *Account) error {
 }
 
 func saveCodexAccount(a *Account) error {
-	// Preserve ALL fields in the original auth.json by modifying only token fields that
-	// refresh updates. If we can't parse the existing file, fail closed to avoid
-	// clobbering user-provided auth.json content.
+	// Preserve ALL fields in the original auth.json by modifying only the fields we own.
+	// If we can't parse the existing file, fail closed to avoid clobbering user-provided
+	// auth.json content.
 	raw, err := os.ReadFile(a.File)
 	if err != nil {
 		return err
@@ -933,34 +976,49 @@ func saveCodexAccount(a *Account) error {
 		return fmt.Errorf("parse %s: %w", a.File, err)
 	}
 
-	tokensAny := root["tokens"]
-	tokens, ok := tokensAny.(map[string]any)
-	if !ok || tokens == nil {
-		tokens = map[string]any{}
-		root["tokens"] = tokens
-	}
+	if isCodexOpenRouterAccount(a) {
+		if a.AccessToken != "" {
+			root["OPENAI_API_KEY"] = a.AccessToken
+		}
+		if a.Backend != "" {
+			root["backend"] = string(a.Backend)
+		}
+		if strings.TrimSpace(a.BaseURL) != "" {
+			root["base_url"] = strings.TrimSpace(a.BaseURL)
+		}
+		if strings.TrimSpace(a.PlanType) != "" {
+			root["plan_type"] = strings.TrimSpace(a.PlanType)
+		}
+	} else {
+		tokensAny := root["tokens"]
+		tokens, ok := tokensAny.(map[string]any)
+		if !ok || tokens == nil {
+			tokens = map[string]any{}
+			root["tokens"] = tokens
+		}
 
-	// Only update the minimum set of fields we own.
-	if a.AccessToken != "" {
-		tokens["access_token"] = a.AccessToken
-	}
-	if a.RefreshToken != "" {
-		tokens["refresh_token"] = a.RefreshToken
-	}
-	if a.IDToken != "" {
-		tokens["id_token"] = a.IDToken
-	}
+		// Only update the minimum set of fields we own.
+		if a.AccessToken != "" {
+			tokens["access_token"] = a.AccessToken
+		}
+		if a.RefreshToken != "" {
+			tokens["refresh_token"] = a.RefreshToken
+		}
+		if a.IDToken != "" {
+			tokens["id_token"] = a.IDToken
+		}
 
-	// Preserve tokens.account_id unless it is missing and we have a value.
-	if _, exists := tokens["account_id"]; !exists && strings.TrimSpace(a.AccountID) != "" {
-		tokens["account_id"] = strings.TrimSpace(a.AccountID)
+		// Preserve tokens.account_id unless it is missing and we have a value.
+		if _, exists := tokens["account_id"]; !exists && strings.TrimSpace(a.AccountID) != "" {
+			tokens["account_id"] = strings.TrimSpace(a.AccountID)
+		}
 	}
 
 	if !a.LastRefresh.IsZero() {
 		root["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
 	}
 
-	// Persist dead flag so accounts stay dead across restarts
+	// Persist dead flag so accounts stay dead across restarts.
 	if a.Dead {
 		root["dead"] = true
 	} else {

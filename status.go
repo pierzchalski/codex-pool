@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -197,6 +198,8 @@ func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
 		"score": func(v float64) string {
 			return fmt.Sprintf("%.2f", v)
 		},
+		"planClass": planTagClass,
+		"planLabel": planTagLabel,
 		"bar": func(v float64) template.HTML {
 			width := v
 			if width > 100 {
@@ -284,8 +287,14 @@ func (h *proxyHandler) loadTokenAnalytics() *TokenAnalytics {
 
 	// Sort by plan type
 	sort.Slice(analytics.PlanCapacities, func(i, j int) bool {
-		order := map[string]int{"team": 0, "pro": 1, "plus": 2, "gemini": 3}
-		return order[analytics.PlanCapacities[i].PlanType] < order[analytics.PlanCapacities[j].PlanType]
+		left := analytics.PlanCapacities[i].PlanType
+		right := analytics.PlanCapacities[j].PlanType
+		li := planDisplayOrder(left)
+		ri := planDisplayOrder(right)
+		if li != ri {
+			return li < ri
+		}
+		return left < right
 	})
 
 	return analytics
@@ -302,6 +311,48 @@ func formatTokenCount(n int64) string {
 		return fmt.Sprintf("~%.0fK", float64(n)/1_000)
 	}
 	return fmt.Sprintf("%d", n)
+}
+
+func planDisplayOrder(plan string) int {
+	switch strings.ToLower(strings.TrimSpace(plan)) {
+	case "team":
+		return 0
+	case "pro":
+		return 1
+	case "plus":
+		return 2
+	case "api", "api-key", "openrouter":
+		return 3
+	case "max", "max_5x", "max_20x", "claude":
+		return 4
+	case "gemini":
+		return 5
+	default:
+		return 100
+	}
+}
+
+func planTagClass(plan string) string {
+	switch strings.ToLower(strings.TrimSpace(plan)) {
+	case "pro":
+		return "tag-pro"
+	case "plus":
+		return "tag-plus"
+	case "team":
+		return "tag-team"
+	case "max", "max_5x", "max_20x", "claude":
+		return "tag-claude"
+	case "gemini":
+		return "tag-gemini"
+	case "api", "api-key", "openrouter":
+		return "tag-api"
+	default:
+		return "tag-generic"
+	}
+}
+
+func planTagLabel(plan string) string {
+	return strings.ReplaceAll(strings.TrimSpace(plan), "_", " ")
 }
 
 const statusHTML = `<!DOCTYPE html>
@@ -378,6 +429,8 @@ const statusHTML = `<!DOCTYPE html>
         .tag-team { background: #8957e5; color: #fff; }
         .tag-gemini { background: #ea4335; color: #fff; }
         .tag-claude { background: #cc785c; color: #fff; }
+        .tag-api { background: #0969da; color: #fff; }
+        .tag-generic { background: #6e7681; color: #fff; }
         .tag-codex { background: #10a37f; color: #fff; }
         .tag-disabled { background: #6e7681; color: #fff; }
         .tag-dead { background: #f85149; color: #fff; }
@@ -481,12 +534,7 @@ const statusHTML = `<!DOCTYPE html>
                 {{if eq .Type "claude"}}<span class="tag tag-claude">claude</span>{{end}}
             </td>
             <td>
-                {{if eq .PlanType "pro"}}<span class="tag tag-pro">pro</span>{{end}}
-                {{if eq .PlanType "plus"}}<span class="tag tag-plus">plus</span>{{end}}
-                {{if eq .PlanType "team"}}<span class="tag tag-team">team</span>{{end}}
-                {{if eq .PlanType "max"}}<span class="tag tag-claude">max</span>{{end}}
-                {{if eq .PlanType "gemini"}}<span class="tag tag-gemini">gemini</span>{{end}}
-                {{if eq .PlanType "claude"}}<span class="tag tag-claude">claude</span>{{end}}
+                {{if .PlanType}}<span class="tag {{planClass .PlanType}}">{{planLabel .PlanType}}</span>{{end}}
             </td>
             <td class="usage-cell">
                 {{bar .EffectivePrimary}}{{pct .PrimaryUsed}}
@@ -533,12 +581,7 @@ const statusHTML = `<!DOCTYPE html>
         </tr>
         {{range .TokenAnalytics.PlanCapacities}}
         <tr>
-            <td>
-                {{if eq .PlanType "pro"}}<span class="tag tag-pro">pro</span>{{end}}
-                {{if eq .PlanType "plus"}}<span class="tag tag-plus">plus</span>{{end}}
-                {{if eq .PlanType "team"}}<span class="tag tag-team">team</span>{{end}}
-                {{if eq .PlanType "gemini"}}<span class="tag tag-gemini">gemini</span>{{end}}
-            </td>
+            <td>{{if .PlanType}}<span class="tag {{planClass .PlanType}}">{{planLabel .PlanType}}</span>{{else}}—{{end}}</td>
             <td>{{.SampleCount}}</td>
             <td>
                 {{if eq .Confidence "high"}}<span style="color: #3fb950;">●</span> high{{end}}
