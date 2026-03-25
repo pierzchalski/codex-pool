@@ -89,13 +89,27 @@ storage_path = "./data/pool_users.json"
 
 In the examples below, `<your top-level admin_token>` always means the exact `admin_token` value from this config file. It is different from the per-user pool token returned by `POST /admin/pool-users`.
 
-### 3. Start the server
+### 3. Install and start the server
 
 Bare metal:
 
+From a local checkout:
+
 ```bash
-go build && ./codex-pool
+go install .
+codex-pool
 ```
+
+Without a checkout:
+
+```bash
+go install github.com/darvell/codex-pool@latest
+codex-pool
+```
+
+If you are working from a fork, prefer `go install .` from the checked-out repo. `go install github.com/your-user/codex-pool@latest` will not work unless that fork also changes the module path.
+
+If you do not want to install into `GOBIN`, `go build && ./codex-pool` works too.
 
 Docker Compose:
 
