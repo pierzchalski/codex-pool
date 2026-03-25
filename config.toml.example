@@ -22,9 +22,11 @@ public_url = ""
 # Enables /admin/* endpoints.
 # If blank, /admin/* returns "admin access disabled".
 admin_token = ""
+# admin_token_file = "./secrets/admin_token"
 
 # Optional self-serve landing page for friends.
 friend_code = ""
+# friend_code_file = "./secrets/friend_code"
 friend_name = ""
 friend_tagline = ""
 
@@ -33,6 +35,7 @@ friend_tagline = ""
 [pool_users]
 # Secret used to sign pool-user tokens. Use a long random value.
 jwt_secret = ""
+# jwt_secret_file = "./secrets/pool_users_jwt_secret"
 
 # Where to store generated pool users.
 storage_path = "./data/pool_users.json"

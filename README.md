@@ -72,22 +72,33 @@ public_url = "http://127.0.0.1:8989"
 
 # Enables /admin/*.
 admin_token = "replace-with-your-admin_token"
+# admin_token_file = "./secrets/admin_token"
 
 # Secondary-usage threshold for tier preference.
 tier_threshold = 0.50
 
 # Optional self-serve landing page for friends.
 # friend_code = "choose-a-friend_code-if-you-want-friends-mode"
+# friend_code_file = "./secrets/friend_code"
 # friend_name = "YourName"
 # friend_tagline = "Optional landing-page tagline"
 
 [pool_users]
 # Required for generated pool-user credentials and /setup/* scripts.
 jwt_secret = "replace-with-your-pool_users.jwt_secret"
+# jwt_secret_file = "./secrets/pool_users_jwt_secret"
 storage_path = "./data/pool_users.json"
 ```
 
 In the examples below, `<your top-level admin_token>` always means the exact `admin_token` value from this config file. It is different from the per-user pool token returned by `POST /admin/pool-users`.
+
+For the three startup secrets, you can use either the inline value or the corresponding `*_file` setting:
+
+- `admin_token` or `admin_token_file`
+- `friend_code` or `friend_code_file`
+- `[pool_users].jwt_secret` or `[pool_users].jwt_secret_file`
+
+Relative `*_file` paths are resolved relative to the directory containing `config.toml`. Environment variables also support file-backed forms: `ADMIN_TOKEN_FILE`, `FRIEND_CODE_FILE`, and `POOL_JWT_SECRET_FILE`.
 
 ### 3. Install and start the server
 
@@ -469,7 +480,7 @@ Hot reload behavior:
 
 - Changes under `pool/` are watched and reloaded automatically.
 - The file watcher also reloads some non-sensitive config fields.
-- Sensitive config such as `admin_token`, `friend_code`, and `[pool_users].jwt_secret` is effectively startup config. If you change those, restart the server/container.
+- Sensitive config such as `admin_token`/`admin_token_file`, `friend_code`/`friend_code_file`, and `[pool_users].jwt_secret`/`[pool_users].jwt_secret_file` is effectively startup config. If you change those, restart the server/container.
 
 Compose restart examples:
 
@@ -486,10 +497,12 @@ If you want a self-serve landing page for other people, add a `friend_code` and 
 
 ```toml
 friend_code = "choose-a-friend_code-to-share"
+# friend_code_file = "./secrets/friend_code"
 friend_name = "YourName"
 
 [pool_users]
 jwt_secret = "replace-with-your-pool_users.jwt_secret"
+# jwt_secret_file = "./secrets/pool_users_jwt_secret"
 ```
 
 That uses the same pool-user machinery described above. The landing page hands out the same style of `/setup/*/<token>` instructions.

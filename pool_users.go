@@ -516,10 +516,15 @@ func isPoolGeminiAPIKey(secret, apiKey string) (bool, string, error) {
 
 // getPoolJWTSecret returns the JWT signing secret from config or env.
 func getPoolJWTSecret() string {
-	if v := os.Getenv("POOL_JWT_SECRET"); v != "" {
-		return v
+	secret, err := getConfigSecret("POOL_JWT_SECRET", "POOL_JWT_SECRET_FILE", poolJWTSecretFromConfig())
+	if err != nil {
+		return ""
 	}
-	if globalConfigFile != nil && globalConfigFile.PoolUsers.JWTSecret != "" {
+	return secret
+}
+
+func poolJWTSecretFromConfig() string {
+	if globalConfigFile != nil {
 		return globalConfigFile.PoolUsers.JWTSecret
 	}
 	return ""

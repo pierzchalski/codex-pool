@@ -1,8 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -18,9 +21,11 @@ type ConfigFile struct {
 	Debug           bool    `toml:"debug"`
 	PublicURL       string  `toml:"public_url"`
 	FriendCode      string  `toml:"friend_code"`
+	FriendCodeFile  string  `toml:"friend_code_file"`
 	FriendName      string  `toml:"friend_name"`
 	FriendTagline   string  `toml:"friend_tagline"`
 	AdminToken      string  `toml:"admin_token"`
+	AdminTokenFile  string  `toml:"admin_token_file"`
 	TierThreshold   float64 `toml:"tier_threshold"` // Secondary usage % threshold for tier preference (default 0.15)
 
 	ModelAliases map[string]string `toml:"model_aliases"`
@@ -52,8 +57,9 @@ func getFriendTagline() string {
 
 // PoolUsersConfig is the [pool_users] section.
 type PoolUsersConfig struct {
-	JWTSecret   string `toml:"jwt_secret"`
-	StoragePath string `toml:"storage_path"`
+	JWTSecret     string `toml:"jwt_secret"`
+	JWTSecretFile string `toml:"jwt_secret_file"`
+	StoragePath   string `toml:"storage_path"`
 }
 
 // loadConfigFile loads config.toml if it exists.
@@ -116,4 +122,79 @@ func getConfigBool(envKey string, configValue bool, defaultValue bool) bool {
 		return true
 	}
 	return defaultValue
+}
+
+// getConfigSecret returns the secret value with priority:
+// inline env var > env file > resolved config value.
+func getConfigSecret(envKey string, envFileKey string, configValue string) (string, error) {
+	if v := strings.TrimSpace(os.Getenv(envKey)); v != "" {
+		return v, nil
+	}
+	if path := strings.TrimSpace(os.Getenv(envFileKey)); path != "" {
+		return readSecretFile(path, "")
+	}
+	return strings.TrimSpace(configValue), nil
+}
+
+// resolveConfigSecrets reads any configured *_file secret values.
+// Inline values win over file-backed values.
+func resolveConfigSecrets(cfg *ConfigFile, configPath string) error {
+	if cfg == nil {
+		return nil
+	}
+
+	baseDir := configBaseDir(configPath)
+
+	secret, err := resolveConfiguredSecret(cfg.AdminToken, cfg.AdminTokenFile, baseDir)
+	if err != nil {
+		return fmt.Errorf("resolve admin_token: %w", err)
+	}
+	cfg.AdminToken = secret
+
+	secret, err = resolveConfiguredSecret(cfg.FriendCode, cfg.FriendCodeFile, baseDir)
+	if err != nil {
+		return fmt.Errorf("resolve friend_code: %w", err)
+	}
+	cfg.FriendCode = secret
+
+	secret, err = resolveConfiguredSecret(cfg.PoolUsers.JWTSecret, cfg.PoolUsers.JWTSecretFile, baseDir)
+	if err != nil {
+		return fmt.Errorf("resolve pool_users.jwt_secret: %w", err)
+	}
+	cfg.PoolUsers.JWTSecret = secret
+
+	return nil
+}
+
+func resolveConfiguredSecret(inlineValue string, filePath string, baseDir string) (string, error) {
+	if v := strings.TrimSpace(inlineValue); v != "" {
+		return v, nil
+	}
+	if path := strings.TrimSpace(filePath); path != "" {
+		return readSecretFile(path, baseDir)
+	}
+	return "", nil
+}
+
+func readSecretFile(secretPath string, baseDir string) (string, error) {
+	resolvedPath := resolveSecretPath(secretPath, baseDir)
+	data, err := os.ReadFile(resolvedPath)
+	if err != nil {
+		return "", fmt.Errorf("read secret file %s: %w", resolvedPath, err)
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+func resolveSecretPath(secretPath string, baseDir string) string {
+	if secretPath == "" || filepath.IsAbs(secretPath) || baseDir == "" {
+		return secretPath
+	}
+	return filepath.Join(baseDir, secretPath)
+}
+
+func configBaseDir(configPath string) string {
+	if configPath == "" {
+		return ""
+	}
+	return filepath.Dir(configPath)
 }

@@ -91,10 +91,12 @@ var globalConfigFile *ConfigFile
 func buildConfig() *config {
 	cfg := &config{}
 	configPath := getConfigPath()
-	// Load config file if it exists
+	// Load config file if it exists.
 	configFile, err := loadConfigFile(configPath)
 	if err != nil {
 		log.Printf("warning: failed to load %s: %v", configPath, err)
+	} else if err := resolveConfigSecrets(configFile, configPath); err != nil {
+		log.Fatalf("resolve config secrets: %v", err)
 	}
 	globalConfigFile = configFile
 
@@ -146,8 +148,17 @@ func buildConfig() *config {
 	}
 	cfg.maxAttempts = getConfigInt("PROXY_MAX_ATTEMPTS", fileCfg.MaxAttempts, 3)
 	cfg.storePath = getConfigString("PROXY_DB_PATH", fileCfg.DBPath, "./data/proxy.db")
-	cfg.friendCode = getConfigString("FRIEND_CODE", fileCfg.FriendCode, "")
-	cfg.adminToken = getConfigString("ADMIN_TOKEN", fileCfg.AdminToken, "")
+	friendCode, err := getConfigSecret("FRIEND_CODE", "FRIEND_CODE_FILE", fileCfg.FriendCode)
+	if err != nil {
+		log.Fatalf("resolve friend code: %v", err)
+	}
+	cfg.friendCode = friendCode
+
+	adminToken, err := getConfigSecret("ADMIN_TOKEN", "ADMIN_TOKEN_FILE", fileCfg.AdminToken)
+	if err != nil {
+		log.Fatalf("resolve admin token: %v", err)
+	}
+	cfg.adminToken = adminToken
 	cfg.retentionDays = 30
 	if v := getenv("PROXY_USAGE_RETENTION_DAYS", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n > 0 {
