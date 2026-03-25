@@ -26,8 +26,11 @@ For real CLI usage, the supported path is:
 
 1. Run the proxy with `admin_token` and `[pool_users].jwt_secret` configured.
 2. Add real provider accounts under `pool/`.
-3. Create a pool user.
-4. Run the generated `/setup/<tool>/<token>` script on each client machine.
+3. Create a pool user with `POST /admin/pool-users`.
+4. Save the returned pool-user `token`.
+5. Run the generated `/setup/<tool>/<token>` script on each client machine.
+
+The exact pool-user creation command lives in [Pointing Your Local CLI At The Pool](#pointing-your-local-cli-at-the-pool).
 
 That works for a single-user install too. It is also the easiest way to keep Codex, Claude, and Gemini all pointed at the same pool.
 
