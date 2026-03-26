@@ -2988,9 +2988,9 @@ func (h *proxyHandler) needsRefresh(a *Account) bool {
 	// first refresh attempt doesn't brick the account for refreshPerAccountInterval.
 	if a.AccessToken == "" {
 		// Use a shorter retry budget for accounts with no usable token:
-		// 30 seconds instead of 15 minutes, to avoid hammering OAuth while
-		// still recovering quickly from transient failures.
-		if !a.LastRefresh.IsZero() && now.Sub(a.LastRefresh) < 30*time.Second {
+		// coldStartRetryInterval instead of refreshPerAccountInterval, to avoid
+		// hammering OAuth while still recovering quickly from transient failures.
+		if !a.LastRefresh.IsZero() && now.Sub(a.LastRefresh) < coldStartRetryInterval {
 			return false
 		}
 		return true
@@ -3053,13 +3053,24 @@ func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 	return err
 }
 
+// coldStartRetryInterval is the retry budget for accounts with no usable access
+// token (seed-only cold start). Much shorter than refreshPerAccountInterval to
+// recover quickly from transient OAuth failures without hammering the endpoint.
+const coldStartRetryInterval = 30 * time.Second
+
 func (h *proxyHandler) refreshAccountOnce(ctx context.Context, a *Account) error {
 	// Per-account rate limiting (persisted to disk via LastRefresh)
 	a.mu.Lock()
 	sinceLastRefresh := time.Since(a.LastRefresh)
-	if !a.LastRefresh.IsZero() && sinceLastRefresh < refreshPerAccountInterval {
+	// Cold-start accounts (no access token yet) use a shorter retry budget
+	// so they can recover from transient OAuth failures quickly.
+	interval := refreshPerAccountInterval
+	if a.AccessToken == "" && a.RefreshToken != "" {
+		interval = coldStartRetryInterval
+	}
+	if !a.LastRefresh.IsZero() && sinceLastRefresh < interval {
 		a.mu.Unlock()
-		return fmt.Errorf("account refresh rate limited (%s), wait %v", a.ID, refreshPerAccountInterval-sinceLastRefresh)
+		return fmt.Errorf("account refresh rate limited (%s), wait %v", a.ID, interval-sinceLastRefresh)
 	}
 	accType := a.Type
 	a.mu.Unlock()
