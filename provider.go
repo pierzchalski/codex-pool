@@ -11,8 +11,11 @@ type Provider interface {
 	Type() AccountType
 
 	// LoadAccount parses provider-specific JSON into an Account.
+	// seedData is the seed credential file (read-only, e.g. from sops).
+	// stateData is the mutable runtime state file (may be nil on cold start).
+	// When stateData is non-nil, mutable fields from state override seed values.
 	// Returns nil, nil if the file doesn't match this provider's format.
-	LoadAccount(name, path string, data []byte) (*Account, error)
+	LoadAccount(name, path string, seedData []byte, stateData []byte) (*Account, error)
 
 	SetAuthHeaders(req *http.Request, acc *Account)
 

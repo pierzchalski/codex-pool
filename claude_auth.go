@@ -255,7 +255,8 @@ func extractProfileInfo(profile map[string]any) *ClaudeProfileInfo {
 }
 
 // SaveClaudeAccount saves a Claude OAuth account to the pool directory.
-func SaveClaudeAccount(poolDir, accountID string, tokens *ClaudeTokenResponse) error {
+// When stateDir is non-empty, seed fields go to poolDir and mutable state goes to stateDir.
+func SaveClaudeAccount(poolDir, stateDir, accountID string, tokens *ClaudeTokenResponse) error {
 	claudeDir := filepath.Join(poolDir, "claude")
 	if err := os.MkdirAll(claudeDir, 0700); err != nil {
 		return fmt.Errorf("create claude dir: %w", err)
@@ -280,15 +281,53 @@ func SaveClaudeAccount(poolDir, accountID string, tokens *ClaudeTokenResponse) e
 		log.Printf("claude account %s: failed to fetch profile: %v", accountID, err)
 	}
 
+	if stateDir != "" {
+		// Split mode: write seed fields to pool, mutable state to stateDir
+		seedData := ClaudeAuthJSON{
+			ClaudeAiOauth: &ClaudeOAuthData{
+				RefreshToken: tokens.RefreshToken,
+				Scopes:       oauthData.Scopes,
+			},
+		}
+		if err := atomicWriteJSON(path, seedData); err != nil {
+			return fmt.Errorf("write seed: %w", err)
+		}
+
+		// Write state file
+		stateClaudeDir := filepath.Join(stateDir, "claude")
+		if err := os.MkdirAll(stateClaudeDir, 0700); err != nil {
+			return fmt.Errorf("create state claude dir: %w", err)
+		}
+		statePath := filepath.Join(stateClaudeDir, filename)
+		stateJSON := map[string]any{
+			"claudeAiOauth": map[string]any{
+				"accessToken":      oauthData.AccessToken,
+				"refreshToken":     oauthData.RefreshToken,
+				"expiresAt":        oauthData.ExpiresAt,
+				"subscriptionType": oauthData.SubscriptionType,
+				"rateLimitTier":    oauthData.RateLimitTier,
+			},
+			"last_refresh":      time.Now().UTC().Format(time.RFC3339Nano),
+			"seed_refresh_hash": seedRefreshHash(tokens.RefreshToken),
+		}
+		return atomicWriteJSON(statePath, stateJSON)
+	}
+
+	// Backward compat: write everything to one file
 	data := ClaudeAuthJSON{
 		ClaudeAiOauth: oauthData,
 	}
-
 	return atomicWriteJSON(path, data)
 }
 
 // saveClaudeAccount persists a Claude OAuth account back to its JSON file.
 func saveClaudeAccount(a *Account) error {
+	// If StateFile is set, write mutable state to the state file.
+	if a.StateFile != "" {
+		return saveClaudeStateFile(a)
+	}
+
+	// Backward compat: read-modify-write the seed file directly.
 	// Read existing file to preserve any extra fields
 	raw, err := os.ReadFile(a.File)
 	if err != nil && !os.IsNotExist(err) {
@@ -341,6 +380,39 @@ func saveClaudeAccount(a *Account) error {
 	}
 
 	return atomicWriteJSON(a.File, root)
+}
+
+// saveClaudeStateFile writes mutable Claude OAuth state to the state file.
+func saveClaudeStateFile(a *Account) error {
+	if err := os.MkdirAll(filepath.Dir(a.StateFile), 0700); err != nil {
+		return fmt.Errorf("create state dir: %w", err)
+	}
+
+	oauth := map[string]any{
+		"accessToken": a.AccessToken,
+		"expiresAt":   a.ExpiresAt.UnixMilli(),
+	}
+	if a.RefreshToken != "" {
+		oauth["refreshToken"] = a.RefreshToken
+	}
+	if a.PlanType != "" && a.PlanType != "claude" {
+		oauth["subscriptionType"] = a.PlanType
+	}
+	if a.RateLimitTier != "" {
+		oauth["rateLimitTier"] = a.RateLimitTier
+	}
+
+	state := map[string]any{
+		"claudeAiOauth": oauth,
+	}
+	if !a.LastRefresh.IsZero() {
+		state["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
+	}
+	if h := seedRefreshHash(a.SeedRefreshToken); h != "" {
+		state["seed_refresh_hash"] = h
+	}
+
+	return atomicWriteJSON(a.StateFile, state)
 }
 
 // RefreshClaudeAccountTokens refreshes tokens for a Claude account and updates it.

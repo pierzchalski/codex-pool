@@ -14,6 +14,7 @@ import (
 type ConfigFile struct {
 	ListenAddr      string  `toml:"listen_addr"`
 	PoolDir         string  `toml:"pool_dir"`
+	StateDir        string  `toml:"state_dir"` // directory for mutable runtime state (default "pool-state", "none" to disable)
 	DBPath          string  `toml:"db_path"`
 	MaxAttempts     int     `toml:"max_attempts"`
 	DisableRefresh  bool    `toml:"disable_refresh"`

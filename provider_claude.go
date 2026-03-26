@@ -27,9 +27,9 @@ func (p *ClaudeProvider) Type() AccountType {
 	return AccountTypeClaude
 }
 
-func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, error) {
+func (p *ClaudeProvider) LoadAccount(name, path string, seedData []byte, stateData []byte) (*Account, error) {
 	var cj ClaudeAuthJSON
-	if err := json.Unmarshal(data, &cj); err != nil {
+	if err := json.Unmarshal(seedData, &cj); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 
@@ -41,7 +41,7 @@ func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, 
 
 	// Load last_refresh from root level (for rate limiting across restarts)
 	var root map[string]any
-	if err := json.Unmarshal(data, &root); err == nil {
+	if err := json.Unmarshal(seedData, &root); err == nil {
 		if lr, ok := root["last_refresh"].(string); ok && lr != "" {
 			if t, err := time.Parse(time.RFC3339Nano, lr); err == nil {
 				acc.LastRefresh = t
@@ -52,9 +52,10 @@ func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, 
 	}
 
 	// Check for OAuth format first (from Claude Code keychain)
-	if cj.ClaudeAiOauth != nil && cj.ClaudeAiOauth.AccessToken != "" {
+	if cj.ClaudeAiOauth != nil && (cj.ClaudeAiOauth.AccessToken != "" || cj.ClaudeAiOauth.RefreshToken != "") {
 		acc.AccessToken = cj.ClaudeAiOauth.AccessToken
 		acc.RefreshToken = cj.ClaudeAiOauth.RefreshToken
+		acc.SeedRefreshToken = cj.ClaudeAiOauth.RefreshToken
 		if cj.ClaudeAiOauth.ExpiresAt > 0 {
 			acc.ExpiresAt = time.UnixMilli(cj.ClaudeAiOauth.ExpiresAt)
 		}
@@ -63,6 +64,11 @@ func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, 
 			acc.PlanType = "claude"
 		}
 		acc.RateLimitTier = cj.ClaudeAiOauth.RateLimitTier
+
+		// Apply state overrides if present
+		if stateData != nil {
+			applyClaudeState(acc, stateData)
+		}
 		return acc, nil
 	}
 
@@ -75,7 +81,71 @@ func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, 
 	if acc.PlanType == "" {
 		acc.PlanType = "claude"
 	}
+	// API key accounts: apply state for dead flag
+	if stateData != nil {
+		applyClaudeAPIKeyState(acc, stateData)
+	}
 	return acc, nil
+}
+
+// applyClaudeState merges mutable state from the state file onto a Claude OAuth account.
+func applyClaudeState(acc *Account, stateData []byte) {
+	var sj ClaudeAuthJSON
+	if err := json.Unmarshal(stateData, &sj); err != nil {
+		return
+	}
+
+	// Parse root-level fields from state
+	var stateRoot map[string]any
+	if err := json.Unmarshal(stateData, &stateRoot); err != nil {
+		return
+	}
+
+	if sj.ClaudeAiOauth != nil {
+		// Refresh token precedence: use seed fingerprint to detect re-seeding
+		if sj.ClaudeAiOauth.RefreshToken != "" {
+			storedHash, _ := stateRoot["seed_refresh_hash"].(string)
+			currentSeedHash := seedRefreshHash(acc.SeedRefreshToken)
+			if storedHash == currentSeedHash {
+				// Seed unchanged: state's rotated refresh token is current
+				acc.RefreshToken = sj.ClaudeAiOauth.RefreshToken
+			}
+			// If hashes differ: seed was re-seeded, keep seed's refresh_token
+		}
+
+		if sj.ClaudeAiOauth.AccessToken != "" {
+			acc.AccessToken = sj.ClaudeAiOauth.AccessToken
+		}
+		if sj.ClaudeAiOauth.ExpiresAt > 0 {
+			acc.ExpiresAt = time.UnixMilli(sj.ClaudeAiOauth.ExpiresAt)
+		}
+		if sj.ClaudeAiOauth.SubscriptionType != "" {
+			acc.PlanType = sj.ClaudeAiOauth.SubscriptionType
+		}
+		if sj.ClaudeAiOauth.RateLimitTier != "" {
+			acc.RateLimitTier = sj.ClaudeAiOauth.RateLimitTier
+		}
+	}
+
+	// Override last_refresh from state
+	if lr, ok := stateRoot["last_refresh"].(string); ok && lr != "" {
+		if t, err := time.Parse(time.RFC3339Nano, lr); err == nil {
+			acc.LastRefresh = t
+		} else if t, err := time.Parse(time.RFC3339, lr); err == nil {
+			acc.LastRefresh = t
+		}
+	}
+}
+
+// applyClaudeAPIKeyState merges state for API key Claude accounts (dead flag only).
+func applyClaudeAPIKeyState(acc *Account, stateData []byte) {
+	var stateRoot map[string]any
+	if err := json.Unmarshal(stateData, &stateRoot); err != nil {
+		return
+	}
+	if dead, ok := stateRoot["dead"].(bool); ok {
+		acc.Dead = dead
+	}
 }
 
 func (p *ClaudeProvider) SetAuthHeaders(req *http.Request, acc *Account) {

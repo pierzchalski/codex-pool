@@ -33,12 +33,13 @@ func (p *GeminiProvider) Type() AccountType {
 	return AccountTypeGemini
 }
 
-func (p *GeminiProvider) LoadAccount(name, path string, data []byte) (*Account, error) {
+func (p *GeminiProvider) LoadAccount(name, path string, seedData []byte, stateData []byte) (*Account, error) {
 	var gj GeminiAuthJSON
-	if err := json.Unmarshal(data, &gj); err != nil {
+	if err := json.Unmarshal(seedData, &gj); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	if gj.AccessToken == "" {
+	// Allow seed-only mode: a seed with only refresh_token is valid
+	if gj.AccessToken == "" && gj.RefreshToken == "" {
 		return nil, nil
 	}
 	planType := gj.PlanType
@@ -46,12 +47,13 @@ func (p *GeminiProvider) LoadAccount(name, path string, data []byte) (*Account, 
 		planType = "gemini" // default
 	}
 	acc := &Account{
-		Type:         AccountTypeGemini,
-		ID:           strings.TrimSuffix(name, filepath.Ext(name)),
-		File:         path,
-		AccessToken:  gj.AccessToken,
-		RefreshToken: gj.RefreshToken,
-		PlanType:     planType,
+		Type:             AccountTypeGemini,
+		ID:               strings.TrimSuffix(name, filepath.Ext(name)),
+		File:             path,
+		AccessToken:      gj.AccessToken,
+		RefreshToken:     gj.RefreshToken,
+		SeedRefreshToken: gj.RefreshToken,
+		PlanType:         planType,
 	}
 	// expiry_date is Unix timestamp in milliseconds
 	if gj.ExpiryDate > 0 {
@@ -65,7 +67,39 @@ func (p *GeminiProvider) LoadAccount(name, path string, data []byte) (*Account, 
 			acc.LastRefresh = t
 		}
 	}
+
+	// Apply state overrides if present
+	if stateData != nil {
+		applyGeminiState(acc, stateData)
+	}
+
 	return acc, nil
+}
+
+// applyGeminiState merges mutable state from the state file onto a Gemini account.
+func applyGeminiState(acc *Account, stateData []byte) {
+	var stateRoot map[string]any
+	if err := json.Unmarshal(stateData, &stateRoot); err != nil {
+		return
+	}
+
+	if at, ok := stateRoot["access_token"].(string); ok && at != "" {
+		acc.AccessToken = at
+	}
+	// Defensively override refresh_token from state (rare rotation by Google)
+	if rt, ok := stateRoot["refresh_token"].(string); ok && rt != "" {
+		acc.RefreshToken = rt
+	}
+	if ed, ok := stateRoot["expiry_date"].(float64); ok && ed > 0 {
+		acc.ExpiresAt = time.UnixMilli(int64(ed))
+	}
+	if lr, ok := stateRoot["last_refresh"].(string); ok && lr != "" {
+		if t, err := time.Parse(time.RFC3339Nano, lr); err == nil {
+			acc.LastRefresh = t
+		} else if t, err := time.Parse(time.RFC3339, lr); err == nil {
+			acc.LastRefresh = t
+		}
+	}
 }
 
 func (p *GeminiProvider) SetAuthHeaders(req *http.Request, acc *Account) {

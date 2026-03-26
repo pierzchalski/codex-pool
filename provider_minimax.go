@@ -32,9 +32,9 @@ type MinimaxAuthJSON struct {
 	APIKey string `json:"api_key"`
 }
 
-func (p *MinimaxProvider) LoadAccount(name, path string, data []byte) (*Account, error) {
+func (p *MinimaxProvider) LoadAccount(name, path string, seedData []byte, stateData []byte) (*Account, error) {
 	var mj MinimaxAuthJSON
-	if err := json.Unmarshal(data, &mj); err != nil {
+	if err := json.Unmarshal(seedData, &mj); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if mj.APIKey == "" {
@@ -47,6 +47,10 @@ func (p *MinimaxProvider) LoadAccount(name, path string, data []byte) (*Account,
 		File:        path,
 		AccessToken: mj.APIKey,
 		PlanType:    "minimax",
+	}
+	// Apply state (dead flag) if present
+	if stateData != nil {
+		applyAPIKeyState(acc, stateData)
 	}
 	return acc, nil
 }

@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,9 +13,11 @@ import (
 
 // poolWatcher watches the pool directory and config file for changes,
 // triggering automatic reloads without requiring a server restart.
+// State directory changes are ignored to avoid reload loops from self-writes.
 type poolWatcher struct {
 	watcher    *fsnotify.Watcher
 	poolDir    string
+	stateDir   string // state directory (ignored for reload triggers)
 	configPath string
 	handler    *proxyHandler
 
@@ -25,7 +28,7 @@ type poolWatcher struct {
 
 const watcherDebounce = 500 * time.Millisecond
 
-func newPoolWatcher(poolDir, configPath string, handler *proxyHandler) (*poolWatcher, error) {
+func newPoolWatcher(poolDir, stateDir, configPath string, handler *proxyHandler) (*poolWatcher, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -34,6 +37,7 @@ func newPoolWatcher(poolDir, configPath string, handler *proxyHandler) (*poolWat
 	pw := &poolWatcher{
 		watcher:    w,
 		poolDir:    poolDir,
+		stateDir:   stateDir,
 		configPath: configPath,
 		handler:    handler,
 	}
@@ -46,6 +50,18 @@ func newPoolWatcher(poolDir, configPath string, handler *proxyHandler) (*poolWat
 			return nil, err
 		}
 		log.Printf("watching pool directory tree: %s (%d dirs)", poolDir, count)
+	}
+
+	// Watch state directory so fsnotify doesn't miss creates, but events from it
+	// are ignored in handleEvent to avoid reload loops from codex-pool's own writes.
+	if stateDir != "" {
+		count, err := addDirectoryTreeWatch(w, stateDir)
+		if err != nil {
+			// Non-fatal: state dir may not exist yet (created on first save).
+			log.Printf("warning: cannot watch state directory %s: %v (will be created on first save)", stateDir, err)
+		} else if count > 0 {
+			log.Printf("watching state directory tree (ignored for reloads): %s (%d dirs)", stateDir, count)
+		}
 	}
 
 	// Watch config file for setting changes.
@@ -95,6 +111,18 @@ func (pw *poolWatcher) handleEvent(event fsnotify.Event) {
 		}
 		pw.debounceCfg = time.AfterFunc(watcherDebounce, pw.reloadConfig)
 		return
+	}
+
+	// Ignore events from the state directory. State changes are initiated by
+	// codex-pool itself (saves after refresh); reloading on self-writes would
+	// cause a reload loop. External edits to state files require touching a
+	// seed file or restarting to take effect.
+	if pw.stateDir != "" {
+		absState, _ := filepath.Abs(pw.stateDir)
+		absEvent, _ := filepath.Abs(event.Name)
+		if absState != "" && absEvent != "" && strings.HasPrefix(absEvent, absState+string(filepath.Separator)) {
+			return
+		}
 	}
 
 	if event.Has(fsnotify.Create) {

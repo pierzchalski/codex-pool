@@ -96,9 +96,9 @@ func (p *CodexProvider) Type() AccountType {
 	return AccountTypeCodex
 }
 
-func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, error) {
+func (p *CodexProvider) LoadAccount(name, path string, seedData []byte, stateData []byte) (*Account, error) {
 	var aj CodexAuthJSON
-	if err := json.Unmarshal(data, &aj); err != nil {
+	if err := json.Unmarshal(seedData, &aj); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 
@@ -132,15 +132,21 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 		if acc.PlanType == "" {
 			acc.PlanType = "api"
 		}
+		// Apply state for OpenRouter (dead flag only)
+		if stateData != nil {
+			applyCodexOpenRouterState(acc, stateData)
+		}
 		return acc, nil
 	}
 
+	// For OAuth accounts, allow seed-only mode (refresh_token but no access_token)
 	if aj.Tokens == nil {
 		return nil, nil
 	}
 
 	acc.AccessToken = aj.Tokens.AccessToken
 	acc.RefreshToken = aj.Tokens.RefreshToken
+	acc.SeedRefreshToken = aj.Tokens.RefreshToken
 	acc.IDToken = aj.Tokens.IDToken
 	if aj.Tokens.AccountID != nil {
 		acc.AccountID = strings.TrimSpace(*aj.Tokens.AccountID)
@@ -155,7 +161,84 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 	if acc.ExpiresAt.IsZero() && aj.LastRefresh != nil {
 		acc.ExpiresAt = aj.LastRefresh.Add(20 * time.Hour)
 	}
+
+	// Apply state overrides if present
+	if stateData != nil {
+		applyCodexState(acc, stateData)
+	}
+
 	return acc, nil
+}
+
+// applyCodexState merges mutable state from the state file onto a Codex OAuth account.
+func applyCodexState(acc *Account, stateData []byte) {
+	var stateRoot map[string]any
+	if err := json.Unmarshal(stateData, &stateRoot); err != nil {
+		return
+	}
+
+	// Parse tokens from state
+	if tokensAny, ok := stateRoot["tokens"].(map[string]any); ok {
+		if at, ok := tokensAny["access_token"].(string); ok && at != "" {
+			acc.AccessToken = at
+		}
+		if idt, ok := tokensAny["id_token"].(string); ok && idt != "" {
+			acc.IDToken = idt
+			// Re-parse claims from state's id_token
+			claims := parseCodexClaims(idt)
+			if !claims.ExpiresAt.IsZero() {
+				acc.ExpiresAt = claims.ExpiresAt
+			}
+			if claims.ChatGPTAccountID != "" {
+				acc.IDTokenChatGPTAccountID = claims.ChatGPTAccountID
+				if acc.AccountID == "" {
+					acc.AccountID = claims.ChatGPTAccountID
+				}
+			}
+			if claims.PlanType != "" {
+				acc.PlanType = claims.PlanType
+			}
+		}
+
+		// Refresh token precedence: use seed fingerprint
+		if rt, ok := tokensAny["refresh_token"].(string); ok && rt != "" {
+			storedHash, _ := stateRoot["seed_refresh_hash"].(string)
+			currentSeedHash := seedRefreshHash(acc.SeedRefreshToken)
+			if storedHash == currentSeedHash {
+				// Seed unchanged: state's rotated refresh token is current
+				acc.RefreshToken = rt
+			}
+			// If hashes differ: seed was re-seeded, keep seed's refresh_token
+		}
+	}
+
+	// Override last_refresh from state
+	if lr, ok := stateRoot["last_refresh"].(string); ok && lr != "" {
+		if t, err := time.Parse(time.RFC3339Nano, lr); err == nil {
+			acc.LastRefresh = t
+		} else if t, err := time.Parse(time.RFC3339, lr); err == nil {
+			acc.LastRefresh = t
+		}
+		// Recompute expiry if last_refresh changed and no JWT exp available
+		if acc.ExpiresAt.IsZero() && !acc.LastRefresh.IsZero() {
+			acc.ExpiresAt = acc.LastRefresh.Add(20 * time.Hour)
+		}
+	}
+
+	if dead, ok := stateRoot["dead"].(bool); ok {
+		acc.Dead = dead
+	}
+}
+
+// applyCodexOpenRouterState merges state for OpenRouter Codex accounts (dead flag only).
+func applyCodexOpenRouterState(acc *Account, stateData []byte) {
+	var stateRoot map[string]any
+	if err := json.Unmarshal(stateData, &stateRoot); err != nil {
+		return
+	}
+	if dead, ok := stateRoot["dead"].(bool); ok {
+		acc.Dead = dead
+	}
 }
 
 func (p *CodexProvider) SetAuthHeaders(req *http.Request, acc *Account) {

@@ -212,7 +212,7 @@ func (h *proxyHandler) handleCodexExchange(w http.ResponseWriter, r *http.Reques
 
 	// Save the account
 	poolDir := filepath.Join(h.cfg.poolDir, "codex")
-	if err := saveNewCodexAccount(poolDir, accountID, tokens); err != nil {
+	if err := saveNewCodexAccount(poolDir, h.cfg.stateDir, accountID, tokens); err != nil {
 		respondJSONError(w, http.StatusInternalServerError, "failed to save account: "+err.Error())
 		return
 	}
@@ -333,7 +333,7 @@ func generateCodexAccountID(idToken string) string {
 }
 
 // saveNewCodexAccount saves a new Codex account to the pool directory
-func saveNewCodexAccount(poolDir, accountID string, tokens *CodexTokenResponse) error {
+func saveNewCodexAccount(poolDir, stateDir, accountID string, tokens *CodexTokenResponse) error {
 	// Ensure pool directory exists
 	if err := os.MkdirAll(poolDir, 0755); err != nil {
 		return fmt.Errorf("create pool dir: %w", err)
@@ -354,6 +354,49 @@ func saveNewCodexAccount(poolDir, accountID string, tokens *CodexTokenResponse) 
 		}
 	}
 
+	if stateDir != "" {
+		// Split mode: seed file gets refresh_token only, state file gets mutable tokens
+		seedJSON := map[string]any{
+			"tokens": map[string]any{
+				"refresh_token": tokens.RefreshToken,
+			},
+		}
+		seedData, err := json.MarshalIndent(seedJSON, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal seed json: %w", err)
+		}
+		if err := os.WriteFile(filePath, seedData, 0600); err != nil {
+			return fmt.Errorf("write seed file: %w", err)
+		}
+
+		// Write state file
+		stateCodexDir := filepath.Join(stateDir, "codex")
+		if err := os.MkdirAll(stateCodexDir, 0700); err != nil {
+			return fmt.Errorf("create state codex dir: %w", err)
+		}
+		stateFilePath := filepath.Join(stateCodexDir, accountID+".json")
+		stateJSON := map[string]any{
+			"tokens": map[string]any{
+				"id_token":      tokens.IDToken,
+				"access_token":  tokens.AccessToken,
+				"refresh_token": tokens.RefreshToken,
+			},
+			"last_refresh":      time.Now().UTC().Format(time.RFC3339Nano),
+			"seed_refresh_hash": seedRefreshHash(tokens.RefreshToken),
+		}
+		stateData, err := json.MarshalIndent(stateJSON, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal state json: %w", err)
+		}
+		if err := os.WriteFile(stateFilePath, stateData, 0600); err != nil {
+			return fmt.Errorf("write state file: %w", err)
+		}
+
+		log.Printf("Saved new Codex account (split): %s -> seed=%s state=%s", accountID, filePath, stateFilePath)
+		return nil
+	}
+
+	// Backward compat: write everything to one file
 	authJSON := map[string]any{
 		"tokens": map[string]any{
 			"id_token":      tokens.IDToken,

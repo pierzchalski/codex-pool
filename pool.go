@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -35,12 +37,16 @@ type Account struct {
 	Type         AccountType // codex, gemini, or claude
 	Backend      AccountBackend
 	ID           string
-	File         string
+	File         string // seed file path (read-only when state_dir is configured)
+	StateFile    string // state file path (read-write), empty = backward compat (writes to File)
 	Label        string
 	BaseURL      string
 	AccessToken  string
 	RefreshToken string
 	IDToken      string
+	// SeedRefreshToken is the original refresh token from the seed file.
+	// Used to compute seed_refresh_hash for detecting re-seeded credentials.
+	SeedRefreshToken string
 	// AccountID corresponds to Codex `auth.json` field `tokens.account_id`.
 	// Codex uses this value as the `ChatGPT-Account-ID` header.
 	AccountID string
@@ -300,7 +306,17 @@ type ClaudeOAuthData struct {
 	RateLimitTier    string   `json:"rateLimitTier"`
 }
 
-func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
+// seedRefreshHash computes a SHA-256 hex digest of a refresh token.
+// Used to detect when a seed file has been re-seeded with a new refresh token.
+func seedRefreshHash(refreshToken string) string {
+	if refreshToken == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(refreshToken))
+	return hex.EncodeToString(h[:])
+}
+
+func loadPool(dir, stateDir string, registry *ProviderRegistry) ([]*Account, error) {
 	var accs []*Account
 
 	// Load accounts from provider subdirectories: pool/codex/, pool/claude/, pool/gemini/
@@ -332,16 +348,30 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 				continue
 			}
 			path := filepath.Join(providerDir, e.Name())
-			data, err := os.ReadFile(path)
+			seedData, err := os.ReadFile(path)
 			if err != nil {
 				return nil, fmt.Errorf("read %s: %w", path, err)
 			}
 
-			acc, err := provider.LoadAccount(e.Name(), path, data)
+			// Read state file if state_dir is configured
+			var stateData []byte
+			var stateFilePath string
+			if stateDir != "" {
+				stateFilePath = filepath.Join(stateDir, subdir, e.Name())
+				if raw, err := os.ReadFile(stateFilePath); err == nil {
+					stateData = raw
+				}
+				// If state file doesn't exist, stateData remains nil (cold start)
+			}
+
+			acc, err := provider.LoadAccount(e.Name(), path, seedData, stateData)
 			if err != nil {
 				return nil, err
 			}
 			if acc != nil {
+				if stateDir != "" {
+					acc.StateFile = stateFilePath
+				}
 				accs = append(accs, acc)
 			}
 		}
@@ -964,9 +994,13 @@ func saveAccount(a *Account) error {
 }
 
 func saveCodexAccount(a *Account) error {
+	// If StateFile is set, write mutable state to the state file (not the seed file).
+	if a.StateFile != "" {
+		return saveCodexStateFile(a)
+	}
+
+	// Backward compat: read-modify-write the seed file directly.
 	// Preserve ALL fields in the original auth.json by modifying only the fields we own.
-	// If we can't parse the existing file, fail closed to avoid clobbering user-provided
-	// auth.json content.
 	raw, err := os.ReadFile(a.File)
 	if err != nil {
 		return err
@@ -1028,8 +1062,55 @@ func saveCodexAccount(a *Account) error {
 	return atomicWriteJSON(a.File, root)
 }
 
+// saveCodexStateFile writes mutable Codex state to the state file.
+func saveCodexStateFile(a *Account) error {
+	if err := os.MkdirAll(filepath.Dir(a.StateFile), 0700); err != nil {
+		return fmt.Errorf("create state dir: %w", err)
+	}
+
+	state := map[string]any{}
+
+	if isCodexOpenRouterAccount(a) {
+		// OpenRouter accounts: only dead flag in state
+		if a.Dead {
+			state["dead"] = true
+		}
+	} else {
+		tokens := map[string]any{}
+		if a.AccessToken != "" {
+			tokens["access_token"] = a.AccessToken
+		}
+		if a.RefreshToken != "" {
+			tokens["refresh_token"] = a.RefreshToken
+		}
+		if a.IDToken != "" {
+			tokens["id_token"] = a.IDToken
+		}
+		state["tokens"] = tokens
+
+		if !a.LastRefresh.IsZero() {
+			state["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
+		}
+		if a.Dead {
+			state["dead"] = true
+		}
+
+		// Seed fingerprint for refresh token precedence detection.
+		if h := seedRefreshHash(a.SeedRefreshToken); h != "" {
+			state["seed_refresh_hash"] = h
+		}
+	}
+
+	return atomicWriteJSON(a.StateFile, state)
+}
+
 func saveGeminiAccount(a *Account) error {
-	// Preserve existing fields in the file
+	// If StateFile is set, write mutable state to the state file.
+	if a.StateFile != "" {
+		return saveGeminiStateFile(a)
+	}
+
+	// Backward compat: read-modify-write the seed file directly.
 	raw, err := os.ReadFile(a.File)
 	if err != nil {
 		return err
@@ -1056,8 +1137,39 @@ func saveGeminiAccount(a *Account) error {
 	return atomicWriteJSON(a.File, root)
 }
 
+// saveGeminiStateFile writes mutable Gemini state to the state file.
+func saveGeminiStateFile(a *Account) error {
+	if err := os.MkdirAll(filepath.Dir(a.StateFile), 0700); err != nil {
+		return fmt.Errorf("create state dir: %w", err)
+	}
+
+	state := map[string]any{}
+	if a.AccessToken != "" {
+		state["access_token"] = a.AccessToken
+	}
+	// Persist refresh_token defensively; Google may rotate it (rare but possible,
+	// and existing code at provider_gemini.go handles it).
+	if a.RefreshToken != "" {
+		state["refresh_token"] = a.RefreshToken
+	}
+	if !a.ExpiresAt.IsZero() {
+		state["expiry_date"] = a.ExpiresAt.UnixMilli()
+	}
+	if !a.LastRefresh.IsZero() {
+		state["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
+	}
+
+	return atomicWriteJSON(a.StateFile, state)
+}
+
 // saveAPIKeyAccount saves an API-key-based account (kimi, minimax, etc.)
 func saveAPIKeyAccount(a *Account) error {
+	// If StateFile is set, write only the dead flag to state.
+	if a.StateFile != "" {
+		return saveAPIKeyStateFile(a)
+	}
+
+	// Backward compat: read-modify-write the seed file directly.
 	raw, err := os.ReadFile(a.File)
 	if err != nil {
 		return err
@@ -1076,6 +1188,19 @@ func saveAPIKeyAccount(a *Account) error {
 		delete(root, "dead")
 	}
 	return atomicWriteJSON(a.File, root)
+}
+
+// saveAPIKeyStateFile writes the dead flag for API-key-based accounts.
+func saveAPIKeyStateFile(a *Account) error {
+	if err := os.MkdirAll(filepath.Dir(a.StateFile), 0700); err != nil {
+		return fmt.Errorf("create state dir: %w", err)
+	}
+
+	state := map[string]any{}
+	if a.Dead {
+		state["dead"] = true
+	}
+	return atomicWriteJSON(a.StateFile, state)
 }
 
 func atomicWriteJSON(filePath string, data any) error {

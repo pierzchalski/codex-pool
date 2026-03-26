@@ -36,6 +36,7 @@ type config struct {
 	kimiBase      *url.URL // Kimi API endpoint
 	minimaxBase   *url.URL // MiniMax API endpoint
 	poolDir       string
+	stateDir      string // directory for mutable runtime state; empty = backward compat
 
 	disableRefresh  bool
 	refreshProxyURL string // HTTP proxy URL for refresh operations
@@ -124,6 +125,12 @@ func buildConfig() *config {
 	cfg.kimiBase = mustParse(getenv("UPSTREAM_KIMI_BASE", "https://api.kimi.com/coding"))
 	cfg.minimaxBase = mustParse(getenv("UPSTREAM_MINIMAX_BASE", "https://api.minimax.io/anthropic"))
 	cfg.poolDir = getConfigString("POOL_DIR", fileCfg.PoolDir, "pool")
+	rawStateDir := getConfigString("STATE_DIR", fileCfg.StateDir, "pool-state")
+	if rawStateDir == "none" {
+		cfg.stateDir = ""
+	} else {
+		cfg.stateDir = rawStateDir
+	}
 
 	// Refresh often fails for some auth.json fixtures; allow opting out.
 	cfg.disableRefresh = getConfigBool("PROXY_DISABLE_REFRESH", fileCfg.DisableRefresh, false)
@@ -213,8 +220,8 @@ func main() {
 	minimaxProvider := NewMinimaxProvider(cfg.minimaxBase)
 	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, kimiProvider, minimaxProvider)
 
-	log.Printf("loading pool from %s", cfg.poolDir)
-	accounts, err := loadPool(cfg.poolDir, registry)
+	log.Printf("loading pool from %s (state_dir=%s)", cfg.poolDir, cfg.stateDir)
+	accounts, err := loadPool(cfg.poolDir, cfg.stateDir, registry)
 	if err != nil {
 		log.Fatalf("load pool: %v", err)
 	}
@@ -350,7 +357,7 @@ func main() {
 
 	// Start file watcher for hot-reload of pool directory and config.
 	configPath := getConfigPath()
-	if watcher, err := newPoolWatcher(cfg.poolDir, configPath, h); err != nil {
+	if watcher, err := newPoolWatcher(cfg.poolDir, cfg.stateDir, configPath, h); err != nil {
 		log.Printf("warning: failed to start file watcher: %v (hot-reload disabled)", err)
 	} else {
 		defer watcher.close()

@@ -395,7 +395,7 @@ func (h *proxyHandler) handleClaudeExchange(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Save the account
-	if err := SaveClaudeAccount(h.cfg.poolDir, session.AccountID, tokens); err != nil {
+	if err := SaveClaudeAccount(h.cfg.poolDir, h.cfg.stateDir, session.AccountID, tokens); err != nil {
 		respondJSONError(w, http.StatusInternalServerError, "failed to save account: "+err.Error())
 		return
 	}

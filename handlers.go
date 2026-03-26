@@ -100,8 +100,8 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 }
 
 func (h *proxyHandler) reloadAccounts() {
-	log.Printf("reloading pool from %s", h.cfg.poolDir)
-	accs, err := loadPool(h.cfg.poolDir, h.registry)
+	log.Printf("reloading pool from %s (state_dir=%s)", h.cfg.poolDir, h.cfg.stateDir)
+	accs, err := loadPool(h.cfg.poolDir, h.cfg.stateDir, h.registry)
 	if err != nil {
 		log.Printf("load pool: %v", err)
 		return

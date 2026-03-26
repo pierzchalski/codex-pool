@@ -32,9 +32,9 @@ type KimiAuthJSON struct {
 	APIKey string `json:"api_key"`
 }
 
-func (p *KimiProvider) LoadAccount(name, path string, data []byte) (*Account, error) {
+func (p *KimiProvider) LoadAccount(name, path string, seedData []byte, stateData []byte) (*Account, error) {
 	var kj KimiAuthJSON
-	if err := json.Unmarshal(data, &kj); err != nil {
+	if err := json.Unmarshal(seedData, &kj); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if kj.APIKey == "" {
@@ -48,7 +48,22 @@ func (p *KimiProvider) LoadAccount(name, path string, data []byte) (*Account, er
 		AccessToken: kj.APIKey,
 		PlanType:    "kimi",
 	}
+	// Apply state (dead flag) if present
+	if stateData != nil {
+		applyAPIKeyState(acc, stateData)
+	}
 	return acc, nil
+}
+
+// applyAPIKeyState applies state overrides for API-key-based accounts (dead flag).
+func applyAPIKeyState(acc *Account, stateData []byte) {
+	var stateRoot map[string]any
+	if err := json.Unmarshal(stateData, &stateRoot); err != nil {
+		return
+	}
+	if dead, ok := stateRoot["dead"].(bool); ok {
+		acc.Dead = dead
+	}
 }
 
 func (p *KimiProvider) SetAuthHeaders(req *http.Request, acc *Account) {
