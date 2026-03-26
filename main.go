@@ -2982,16 +2982,24 @@ func (h *proxyHandler) needsRefresh(a *Account) bool {
 	}
 	now := time.Now()
 
+	// Seed-only cold start: no access token but has refresh token.
+	// Must refresh immediately so the account becomes usable.
+	// This check runs BEFORE per-account rate limiting so that a failed
+	// first refresh attempt doesn't brick the account for refreshPerAccountInterval.
+	if a.AccessToken == "" {
+		// Use a shorter retry budget for accounts with no usable token:
+		// 30 seconds instead of 15 minutes, to avoid hammering OAuth while
+		// still recovering quickly from transient failures.
+		if !a.LastRefresh.IsZero() && now.Sub(a.LastRefresh) < 30*time.Second {
+			return false
+		}
+		return true
+	}
+
 	// Per-account rate limiting: don't refresh too frequently
 	// This prevents hammering the OAuth endpoint when refresh tokens are invalid
 	if !a.LastRefresh.IsZero() && now.Sub(a.LastRefresh) < refreshPerAccountInterval {
 		return false
-	}
-
-	// Seed-only cold start: no access token but has refresh token.
-	// Must refresh immediately so the account becomes usable.
-	if a.AccessToken == "" {
-		return true
 	}
 
 	// Only refresh if token is ACTUALLY expired (not "about to expire")

@@ -560,7 +560,7 @@ func TestGeminiSaveStateIncludesHash(t *testing.T) {
 }
 
 // TestNeedsRefreshSeedOnlyColdStart verifies that seed-only accounts with no
-// access token trigger an immediate refresh.
+// access token trigger an immediate refresh, including after a failed attempt.
 func TestNeedsRefreshSeedOnlyColdStart(t *testing.T) {
 	h := &proxyHandler{}
 
@@ -573,6 +573,24 @@ func TestNeedsRefreshSeedOnlyColdStart(t *testing.T) {
 	}
 	if !h.needsRefresh(acc) {
 		t.Fatal("expected needsRefresh=true for seed-only cold-start account (empty access token)")
+	}
+
+	// Simulate a failed refresh attempt (stamps LastRefresh but AccessToken stays empty).
+	// The account should still be eligible for refresh after the short retry window (30s),
+	// NOT the normal 15-minute backoff.
+	acc.mu.Lock()
+	acc.LastRefresh = time.Now().Add(-31 * time.Second) // 31 seconds ago
+	acc.mu.Unlock()
+	if !h.needsRefresh(acc) {
+		t.Fatal("expected needsRefresh=true for seed-only account after short backoff")
+	}
+
+	// But within the 30-second retry window, should NOT retry
+	acc.mu.Lock()
+	acc.LastRefresh = time.Now().Add(-5 * time.Second) // 5 seconds ago
+	acc.mu.Unlock()
+	if h.needsRefresh(acc) {
+		t.Fatal("expected needsRefresh=false for seed-only account within 30s retry window")
 	}
 
 	// Account with a valid access token and no expiry should NOT need refresh
