@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -80,6 +81,7 @@ func (p *GeminiProvider) LoadAccount(name, path string, seedData []byte, stateDa
 func applyGeminiState(acc *Account, stateData []byte) {
 	var stateRoot map[string]any
 	if err := json.Unmarshal(stateData, &stateRoot); err != nil {
+		log.Printf("warning: corrupt state file for Gemini account %s: %v (using seed only)", acc.ID, err)
 		return
 	}
 

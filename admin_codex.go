@@ -355,23 +355,9 @@ func saveNewCodexAccount(poolDir, stateDir, accountID string, tokens *CodexToken
 	}
 
 	if stateDir != "" {
-		// Split mode: seed file gets refresh_token and account_id, state file gets mutable tokens
-		seedTokens := map[string]any{
-			"refresh_token": tokens.RefreshToken,
-		}
-		// Extract account_id from the JWT for the seed (so it survives state loss)
-		claims := parseCodexClaims(tokens.IDToken)
-		if claims.ChatGPTAccountID != "" {
-			seedTokens["account_id"] = claims.ChatGPTAccountID
-		}
-		seedJSON := map[string]any{
-			"tokens": seedTokens,
-		}
-		if err := atomicWriteJSON(filePath, seedJSON); err != nil {
-			return fmt.Errorf("write seed file: %w", err)
-		}
-
-		// Write state file
+		// Split mode: write state file FIRST, then seed file.
+		// The seed file landing in pool/ triggers a watcher reload, so it must be
+		// written last to ensure the state file is already present when loadPool runs.
 		stateCodexDir := filepath.Join(stateDir, "codex")
 		if err := os.MkdirAll(stateCodexDir, 0700); err != nil {
 			return fmt.Errorf("create state codex dir: %w", err)
@@ -388,6 +374,24 @@ func saveNewCodexAccount(poolDir, stateDir, accountID string, tokens *CodexToken
 		}
 		if err := atomicWriteJSON(stateFilePath, stateJSON); err != nil {
 			return fmt.Errorf("write state file: %w", err)
+		}
+
+		// Now write the seed file (triggers watcher reload).
+		seedTokens := map[string]any{
+			"refresh_token": tokens.RefreshToken,
+		}
+		// Extract account_id from the JWT for the seed (so it survives state loss)
+		claims := parseCodexClaims(tokens.IDToken)
+		if claims.ChatGPTAccountID != "" {
+			seedTokens["account_id"] = claims.ChatGPTAccountID
+		}
+		seedJSON := map[string]any{
+			"tokens": seedTokens,
+		}
+		if err := atomicWriteJSON(filePath, seedJSON); err != nil {
+			// Best-effort cleanup: remove state file since seed write failed.
+			os.Remove(stateFilePath)
+			return fmt.Errorf("write seed file: %w", err)
 		}
 
 		log.Printf("Saved new Codex account (split): %s -> seed=%s state=%s", accountID, filePath, stateFilePath)

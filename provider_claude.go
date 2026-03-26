@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -92,12 +93,14 @@ func (p *ClaudeProvider) LoadAccount(name, path string, seedData []byte, stateDa
 func applyClaudeState(acc *Account, stateData []byte) {
 	var sj ClaudeAuthJSON
 	if err := json.Unmarshal(stateData, &sj); err != nil {
+		log.Printf("warning: corrupt state file for Claude account %s: %v (using seed only)", acc.ID, err)
 		return
 	}
 
 	// Parse root-level fields from state
 	var stateRoot map[string]any
 	if err := json.Unmarshal(stateData, &stateRoot); err != nil {
+		log.Printf("warning: corrupt state file for Claude account %s: %v (using seed only)", acc.ID, err)
 		return
 	}
 

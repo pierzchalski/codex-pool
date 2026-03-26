@@ -559,6 +559,44 @@ func TestGeminiSaveStateIncludesHash(t *testing.T) {
 	}
 }
 
+// TestNeedsRefreshSeedOnlyColdStart verifies that seed-only accounts with no
+// access token trigger an immediate refresh.
+func TestNeedsRefreshSeedOnlyColdStart(t *testing.T) {
+	h := &proxyHandler{}
+
+	// Seed-only cold start: has refresh token but no access token, no expiry, no last refresh
+	acc := &Account{
+		Type:         AccountTypeClaude,
+		ID:           "cold-start",
+		RefreshToken: "some-refresh",
+		// AccessToken, ExpiresAt, LastRefresh all zero
+	}
+	if !h.needsRefresh(acc) {
+		t.Fatal("expected needsRefresh=true for seed-only cold-start account (empty access token)")
+	}
+
+	// Account with a valid access token and no expiry should NOT need refresh
+	accWithToken := &Account{
+		Type:         AccountTypeClaude,
+		ID:           "has-token",
+		AccessToken:  "sk-ant-oat-valid",
+		RefreshToken: "some-refresh",
+	}
+	if h.needsRefresh(accWithToken) {
+		t.Fatal("expected needsRefresh=false for account with valid access token")
+	}
+
+	// Account with no refresh token should NOT need refresh
+	accNoRefresh := &Account{
+		Type:        AccountTypeClaude,
+		ID:          "no-refresh",
+		AccessToken: "sk-ant-api-key",
+	}
+	if h.needsRefresh(accNoRefresh) {
+		t.Fatal("expected needsRefresh=false for account without refresh token")
+	}
+}
+
 // --- helpers ---
 
 func newTestRegistry(t *testing.T) *ProviderRegistry {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -174,6 +175,7 @@ func (p *CodexProvider) LoadAccount(name, path string, seedData []byte, stateDat
 func applyCodexState(acc *Account, stateData []byte) {
 	var stateRoot map[string]any
 	if err := json.Unmarshal(stateData, &stateRoot); err != nil {
+		log.Printf("warning: corrupt state file for Codex account %s: %v (using seed only)", acc.ID, err)
 		return
 	}
 

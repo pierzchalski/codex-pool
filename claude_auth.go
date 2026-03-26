@@ -282,18 +282,9 @@ func SaveClaudeAccount(poolDir, stateDir, accountID string, tokens *ClaudeTokenR
 	}
 
 	if stateDir != "" {
-		// Split mode: write seed fields to pool, mutable state to stateDir
-		seedData := ClaudeAuthJSON{
-			ClaudeAiOauth: &ClaudeOAuthData{
-				RefreshToken: tokens.RefreshToken,
-				Scopes:       oauthData.Scopes,
-			},
-		}
-		if err := atomicWriteJSON(path, seedData); err != nil {
-			return fmt.Errorf("write seed: %w", err)
-		}
-
-		// Write state file
+		// Split mode: write state file FIRST, then seed file.
+		// The seed file landing in pool/ triggers a watcher reload, so it must be
+		// written last to ensure the state file is already present when loadPool runs.
 		stateClaudeDir := filepath.Join(stateDir, "claude")
 		if err := os.MkdirAll(stateClaudeDir, 0700); err != nil {
 			return fmt.Errorf("create state claude dir: %w", err)
@@ -310,7 +301,23 @@ func SaveClaudeAccount(poolDir, stateDir, accountID string, tokens *ClaudeTokenR
 			"last_refresh":      time.Now().UTC().Format(time.RFC3339Nano),
 			"seed_refresh_hash": seedRefreshHash(tokens.RefreshToken),
 		}
-		return atomicWriteJSON(statePath, stateJSON)
+		if err := atomicWriteJSON(statePath, stateJSON); err != nil {
+			return fmt.Errorf("write state: %w", err)
+		}
+
+		// Now write the seed file (triggers watcher reload).
+		seedData := ClaudeAuthJSON{
+			ClaudeAiOauth: &ClaudeOAuthData{
+				RefreshToken: tokens.RefreshToken,
+				Scopes:       oauthData.Scopes,
+			},
+		}
+		if err := atomicWriteJSON(path, seedData); err != nil {
+			// Best-effort cleanup: remove state file since seed write failed.
+			os.Remove(statePath)
+			return fmt.Errorf("write seed: %w", err)
+		}
+		return nil
 	}
 
 	// Backward compat: write everything to one file

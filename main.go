@@ -15,6 +15,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -219,6 +220,22 @@ func main() {
 	kimiProvider := NewKimiProvider(cfg.kimiBase)
 	minimaxProvider := NewMinimaxProvider(cfg.minimaxBase)
 	registry := NewProviderRegistry(codexProvider, claudeProvider, geminiProvider, kimiProvider, minimaxProvider)
+
+	// Validate that stateDir and poolDir don't overlap. If stateDir is a prefix
+	// of poolDir (or vice versa), the watcher's state-dir filter would suppress
+	// all pool events, silently disabling hot-reload.
+	if cfg.stateDir != "" {
+		absPool, _ := filepath.Abs(cfg.poolDir)
+		absState, _ := filepath.Abs(cfg.stateDir)
+		if absPool != "" && absState != "" {
+			if absPool == absState {
+				log.Fatalf("state_dir (%s) must not be the same as pool_dir (%s)", cfg.stateDir, cfg.poolDir)
+			}
+			if strings.HasPrefix(absPool+string(filepath.Separator), absState+string(filepath.Separator)) {
+				log.Fatalf("state_dir (%s) must not be a parent of pool_dir (%s)", cfg.stateDir, cfg.poolDir)
+			}
+		}
+	}
 
 	log.Printf("loading pool from %s (state_dir=%s)", cfg.poolDir, cfg.stateDir)
 	accounts, err := loadPool(cfg.poolDir, cfg.stateDir, registry)
@@ -2969,6 +2986,12 @@ func (h *proxyHandler) needsRefresh(a *Account) bool {
 	// This prevents hammering the OAuth endpoint when refresh tokens are invalid
 	if !a.LastRefresh.IsZero() && now.Sub(a.LastRefresh) < refreshPerAccountInterval {
 		return false
+	}
+
+	// Seed-only cold start: no access token but has refresh token.
+	// Must refresh immediately so the account becomes usable.
+	if a.AccessToken == "" {
+		return true
 	}
 
 	// Only refresh if token is ACTUALLY expired (not "about to expire")
