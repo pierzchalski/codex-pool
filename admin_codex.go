@@ -355,17 +355,19 @@ func saveNewCodexAccount(poolDir, stateDir, accountID string, tokens *CodexToken
 	}
 
 	if stateDir != "" {
-		// Split mode: seed file gets refresh_token only, state file gets mutable tokens
+		// Split mode: seed file gets refresh_token and account_id, state file gets mutable tokens
+		seedTokens := map[string]any{
+			"refresh_token": tokens.RefreshToken,
+		}
+		// Extract account_id from the JWT for the seed (so it survives state loss)
+		claims := parseCodexClaims(tokens.IDToken)
+		if claims.ChatGPTAccountID != "" {
+			seedTokens["account_id"] = claims.ChatGPTAccountID
+		}
 		seedJSON := map[string]any{
-			"tokens": map[string]any{
-				"refresh_token": tokens.RefreshToken,
-			},
+			"tokens": seedTokens,
 		}
-		seedData, err := json.MarshalIndent(seedJSON, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal seed json: %w", err)
-		}
-		if err := os.WriteFile(filePath, seedData, 0600); err != nil {
+		if err := atomicWriteJSON(filePath, seedJSON); err != nil {
 			return fmt.Errorf("write seed file: %w", err)
 		}
 
@@ -384,11 +386,7 @@ func saveNewCodexAccount(poolDir, stateDir, accountID string, tokens *CodexToken
 			"last_refresh":      time.Now().UTC().Format(time.RFC3339Nano),
 			"seed_refresh_hash": seedRefreshHash(tokens.RefreshToken),
 		}
-		stateData, err := json.MarshalIndent(stateJSON, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal state json: %w", err)
-		}
-		if err := os.WriteFile(stateFilePath, stateData, 0600); err != nil {
+		if err := atomicWriteJSON(stateFilePath, stateJSON); err != nil {
 			return fmt.Errorf("write state file: %w", err)
 		}
 

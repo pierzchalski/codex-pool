@@ -422,6 +422,143 @@ func TestSeedRefreshHash(t *testing.T) {
 	}
 }
 
+// TestGeminiSeedFingerprintReseed verifies Gemini re-seeded refresh token overrides state.
+func TestGeminiSeedFingerprintReseed(t *testing.T) {
+	poolDir := t.TempDir()
+	stateDir := t.TempDir()
+
+	// Create Gemini seed with a NEW refresh token
+	geminiSeedDir := filepath.Join(poolDir, "gemini")
+	if err := os.MkdirAll(geminiSeedDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	seed := map[string]any{
+		"refresh_token": "new-gem-refresh",
+		"access_token":  "old-access",
+	}
+	writeTempJSON(t, filepath.Join(geminiSeedDir, "acct1.json"), seed)
+
+	// Create state file with old rotated token and hash of OLD seed
+	geminiStateDir := filepath.Join(stateDir, "gemini")
+	if err := os.MkdirAll(geminiStateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	state := map[string]any{
+		"access_token":      "state-access",
+		"refresh_token":     "state-gem-refresh",
+		"expiry_date":       float64(time.Now().Add(1 * time.Hour).UnixMilli()),
+		"seed_refresh_hash": seedRefreshHash("old-gem-refresh"), // hash of OLD seed
+	}
+	writeTempJSON(t, filepath.Join(geminiStateDir, "acct1.json"), state)
+
+	registry := newTestRegistry(t)
+	accs, err := loadPool(poolDir, stateDir, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accs) != 1 {
+		t.Fatalf("expected 1 account, got %d", len(accs))
+	}
+
+	acc := accs[0]
+	// Hash mismatch: seed was re-seeded, should use seed's refresh_token
+	if acc.RefreshToken != "new-gem-refresh" {
+		t.Fatalf("expected seed refresh_token after re-seed, got %q", acc.RefreshToken)
+	}
+	// Access token should come from state
+	if acc.AccessToken != "state-access" {
+		t.Fatalf("expected state access_token, got %q", acc.AccessToken)
+	}
+}
+
+// TestClaudeSeedOnlyColdStart verifies Claude accounts with only refreshToken can load.
+func TestClaudeSeedOnlyColdStart(t *testing.T) {
+	poolDir := t.TempDir()
+	stateDir := t.TempDir()
+
+	claudeSeedDir := filepath.Join(poolDir, "claude")
+	if err := os.MkdirAll(claudeSeedDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Seed with only refreshToken, no accessToken
+	seed := map[string]any{
+		"claudeAiOauth": map[string]any{
+			"refreshToken":     "seed-refresh-only",
+			"subscriptionType": "max",
+		},
+	}
+	writeTempJSON(t, filepath.Join(claudeSeedDir, "acct1.json"), seed)
+
+	registry := newTestRegistry(t)
+	accs, err := loadPool(poolDir, stateDir, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accs) != 1 {
+		t.Fatalf("expected 1 account from seed-only Claude, got %d", len(accs))
+	}
+
+	acc := accs[0]
+	if acc.RefreshToken != "seed-refresh-only" {
+		t.Fatalf("expected seed refresh token, got %q", acc.RefreshToken)
+	}
+	if acc.AccessToken != "" {
+		t.Fatalf("expected empty access token on cold start, got %q", acc.AccessToken)
+	}
+	if acc.PlanType != "max" {
+		t.Fatalf("expected plan type 'max', got %q", acc.PlanType)
+	}
+
+	// Verify that RefreshToken method would attempt refresh (not skip as API key)
+	// We can't call RefreshToken without a real server, but we verify
+	// the account loaded successfully with a refresh token and empty access token.
+	_ = NewClaudeProvider(mustParse("https://api.anthropic.com"))
+	if acc.RefreshToken == "" {
+		t.Fatal("account should have refresh token for OAuth refresh")
+	}
+}
+
+// TestGeminiSaveStateIncludesHash verifies Gemini state file includes seed_refresh_hash.
+func TestGeminiSaveStateIncludesHash(t *testing.T) {
+	seedDir := t.TempDir()
+	stateDir := t.TempDir()
+
+	seedPath := filepath.Join(seedDir, "acct.json")
+	writeTempJSON(t, seedPath, map[string]any{
+		"refresh_token": "gem-refresh",
+	})
+
+	geminiStateDir := filepath.Join(stateDir, "gemini")
+
+	acc := &Account{
+		Type:             AccountTypeGemini,
+		ID:               "acct",
+		File:             seedPath,
+		StateFile:        filepath.Join(geminiStateDir, "acct.json"),
+		AccessToken:      "ya29.new-access",
+		RefreshToken:     "gem-refresh",
+		SeedRefreshToken: "gem-refresh",
+		ExpiresAt:        time.Now().Add(1 * time.Hour),
+		LastRefresh:      time.Now().UTC(),
+	}
+
+	if err := saveAccount(acc); err != nil {
+		t.Fatal(err)
+	}
+
+	stateRaw, err := os.ReadFile(acc.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stateRoot map[string]any
+	if err := json.Unmarshal(stateRaw, &stateRoot); err != nil {
+		t.Fatal(err)
+	}
+	if stateRoot["seed_refresh_hash"] != seedRefreshHash("gem-refresh") {
+		t.Fatalf("expected seed_refresh_hash in Gemini state, got %v", stateRoot["seed_refresh_hash"])
+	}
+}
+
 // --- helpers ---
 
 func newTestRegistry(t *testing.T) *ProviderRegistry {

@@ -86,9 +86,16 @@ func applyGeminiState(acc *Account, stateData []byte) {
 	if at, ok := stateRoot["access_token"].(string); ok && at != "" {
 		acc.AccessToken = at
 	}
-	// Defensively override refresh_token from state (rare rotation by Google)
+	// Refresh token precedence: use seed fingerprint to detect re-seeding.
+	// Google rarely rotates refresh tokens, but we handle it consistently.
 	if rt, ok := stateRoot["refresh_token"].(string); ok && rt != "" {
-		acc.RefreshToken = rt
+		storedHash, _ := stateRoot["seed_refresh_hash"].(string)
+		currentSeedHash := seedRefreshHash(acc.SeedRefreshToken)
+		if storedHash == currentSeedHash {
+			// Seed unchanged: state's refresh token is current
+			acc.RefreshToken = rt
+		}
+		// If hashes differ: seed was re-seeded, keep seed's refresh_token
 	}
 	if ed, ok := stateRoot["expiry_date"].(float64); ok && ed > 0 {
 		acc.ExpiresAt = time.UnixMilli(int64(ed))

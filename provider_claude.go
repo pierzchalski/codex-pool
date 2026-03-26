@@ -149,8 +149,9 @@ func applyClaudeAPIKeyState(acc *Account, stateData []byte) {
 }
 
 func (p *ClaudeProvider) SetAuthHeaders(req *http.Request, acc *Account) {
-	// OAuth tokens start with sk-ant-oat, API keys with sk-ant-api
-	if strings.HasPrefix(acc.AccessToken, "sk-ant-oat") {
+	// OAuth tokens start with sk-ant-oat, API keys with sk-ant-api.
+	// Also treat accounts with a refresh token as OAuth (seed-only cold start).
+	if strings.HasPrefix(acc.AccessToken, "sk-ant-oat") || acc.RefreshToken != "" {
 		req.Header.Set("Authorization", "Bearer "+acc.AccessToken)
 	} else {
 		req.Header.Set("X-Api-Key", acc.AccessToken)
@@ -158,8 +159,10 @@ func (p *ClaudeProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 }
 
 func (p *ClaudeProvider) RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error {
-	// Only OAuth tokens (not API keys) can be refreshed
-	if !strings.HasPrefix(acc.AccessToken, "sk-ant-oat") {
+	// OAuth accounts have a RefreshToken; API key accounts do not.
+	// Check RefreshToken rather than AccessToken prefix to support seed-only
+	// cold start where AccessToken may be empty.
+	if acc.RefreshToken == "" {
 		// API keys don't need refresh
 		return nil
 	}

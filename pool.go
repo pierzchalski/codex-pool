@@ -1158,6 +1158,10 @@ func saveGeminiStateFile(a *Account) error {
 	if !a.LastRefresh.IsZero() {
 		state["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
 	}
+	// Seed fingerprint for refresh token precedence detection (consistency with Claude/Codex).
+	if h := seedRefreshHash(a.SeedRefreshToken); h != "" {
+		state["seed_refresh_hash"] = h
+	}
 
 	return atomicWriteJSON(a.StateFile, state)
 }
